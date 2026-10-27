@@ -40,6 +40,7 @@ window.createTabMode = function (h) {
     api = new alphaTab.AlphaTabApi(host, settings());
     api.scoreLoaded.on(score => {
       tracks = score.tracks;
+      if (h.baseTempo) h.baseTempo(score.tempo || 120);
       document.title = (score.title || h.fileName() || "악보") + " — PDFScore";
       buildParts();
       // alphaTab은 기본으로 첫 트랙만 그리므로 모든 트랙을 그리게 한다

@@ -171,7 +171,8 @@
     enterTabMode();
     tab.loadScore(atScore);
     window.pdfscore.lastTex = tex;
-    toast(`PDF 데이터로 ${score.bars.length}마디를 읽었습니다${tempo ? "" : " (템포 표시가 없어 120으로 설정)"}.`, 5000);
+    toast(`PDF 데이터로 ${score.bars.length}마디를 읽었습니다${tempo ? "" : " (템포 표시가 없어 ♩=120으로 시작합니다. 템포 슬라이더로 맞춰 주세요)"}.` +
+      (score.report.length ? " " + score.report.join(" ") : ""), 8000);
     return true;
   }
 
@@ -748,6 +749,7 @@
     osmd.cursor.SkipInvisibleNotes = false;
 
     buildTimeline();
+    setBaseTempo(osmd.Sheet.DefaultStartTempoInBpm || osmd.Sheet.userStartTempoInBPM || 120);
     state.loaded = true;
     state.posSec = 0;
     buildPartList();
@@ -1319,6 +1321,7 @@
     fileName: () => fileName,
     alert: (title, msg) => alertBox(title, `<p>${escapeHtml(msg)}</p>`),
     status: msg => setOmrBar(msg),
+    baseTempo: bpm => setBaseTempo(bpm),
     time: (cur, total) => {
       tabTotal = total;
       ui.timeCur.textContent = fmtTime(cur);
@@ -1347,10 +1350,19 @@
   ui.rewind.onclick = () => (tab.active ? tab.seekRatio(0) : seekTo(0));
   ui.autoScroll.onchange = () => tab.setAutoScroll(ui.autoScroll.checked);
 
+  // 템포 슬라이더는 BPM 단위. 악보의 기본 템포를 기준으로 재생 속도 비율을 정한다
+  // (곡 중간에 템포가 바뀌는 악보는 같은 비율로 함께 빨라지거나 느려진다)
+  function setBaseTempo(bpm) {
+    state.baseBpm = Math.round(bpm) || 120;
+    ui.tempo.value = state.baseBpm;
+    ui.tempoOut.textContent = `♩=${state.baseBpm}`;
+    state.rate = 1;
+    tab.setRate(1);
+  }
   ui.tempo.oninput = () => {
     const pos = currentPos();
-    state.rate = ui.tempo.value / 100;
-    ui.tempoOut.textContent = ui.tempo.value + "%";
+    state.rate = ui.tempo.value / (state.baseBpm || 120);
+    ui.tempoOut.textContent = `♩=${ui.tempo.value}`;
     tab.setRate(state.rate);
     if (state.playing) { // 현재 위치를 기준으로 다시 맞춤
       silenceAll();

@@ -8,14 +8,28 @@
 
 const near = (a, b, tol) => Math.abs(a - b) <= tol;
 
+/** 흰색(보표 줄을 가리는 바탕) 도형인가 */
+export function isWhite(fill) {
+  if (!fill || typeof fill !== "string" || fill[0] !== "#" || fill.length < 7) return false;
+  const [r, g, b] = [1, 3, 5].map(i => parseInt(fill.slice(i, i + 2), 16));
+  return r > 230 && g > 230 && b > 230;
+}
+
 /* ------------------------------------------------------------ 1) 오선 찾기 */
 
 /** 가로로 긴 얇은 사각형 = 오선 줄. 같은 x 범위에서 일정한 간격으로 이어지는 줄을 묶는다 */
 export function findStaves(page) {
-  const lines = page.rects
-    .filter(r => r.y1 - r.y0 < 0.9 && r.x1 - r.x0 > 40)
-    .map(r => ({ x0: r.x0, x1: r.x1, y: (r.y0 + r.y1) / 2 }))
+  const raw = page.rects
+    .filter(r => !isWhite(r.fill) && r.y1 - r.y0 < 0.9 && r.x1 - r.x0 > 40)
+    .map(r => ({ x0: r.x0, x1: r.x1, y: (r.y0 + r.y1) / 2, gaps: [] }))
     .sort((a, b) => a.y - b.y || a.x0 - b.x0);
+  // 가운데가 비어 끊긴 보표 줄(코다 앞 빈칸 등)은 하나로 잇고 빈칸 위치를 기억한다
+  const lines = [];
+  for (const l of raw) {
+    const last = lines[lines.length - 1];
+    if (last && Math.abs(last.y - l.y) < 0.2 && l.x0 > last.x1 && l.x0 - last.x1 < 30) { last.gaps.push([last.x1, l.x0]); last.x1 = l.x1; }
+    else lines.push(l);
+  }
   const used = new Set();
   const staves = [];
   for (let i = 0; i < lines.length; i++) {
@@ -36,7 +50,7 @@ export function findStaves(page) {
       group.forEach(k => used.add(k));
       const ls = group.map(k => lines[k]);
       staves.push({
-        x0: ls[0].x0, x1: ls[0].x1, lines: ls.map(l => l.y),
+        x0: ls[0].x0, x1: ls[0].x1, lines: ls.map(l => l.y), gaps: ls[0].gaps,
         top: ls[0].y, bottom: ls[ls.length - 1].y,
         gap: (ls[ls.length - 1].y - ls[0].y) / (ls.length - 1),
         count: ls.length,
@@ -48,7 +62,7 @@ export function findStaves(page) {
 
 /** 세로로 긴 얇은 사각형 = 마디줄/기둥/단 묶음선 */
 export function verticalRects(page) {
-  return page.rects.filter(r => r.x1 - r.x0 < 2.4 && r.y1 - r.y0 > 2) // 굵은 마디줄(약 1.8pt)까지
+  return page.rects.filter(r => !isWhite(r.fill) && r.x1 - r.x0 < 2.4 && r.y1 - r.y0 > 2) // 굵은 마디줄(약 1.8pt)까지
     .map(r => ({ x: (r.x0 + r.x1) / 2, w: r.x1 - r.x0, y0: r.y0, y1: r.y1 }));
 }
 
@@ -109,6 +123,11 @@ export function systemBarlines(sys, verts) {
 /** 마디 경계 x 목록: 보표 왼쪽 끝(음자리표 포함)부터 마디줄들 */
 export function measureEdges(staff, bars) {
   const xs = [staff.x0];
+  // 보표가 끊긴 빈칸(코다 앞 등): 빈칸 바로 앞 마디줄과 빈칸 뒤 음자리표 자리의 마디줄은 버리고,
+  // 빈칸 시작 하나만 경계로 둔다 (가짜 빈 마디가 생기지 않게)
+  const gaps = staff.gaps || [];
+  bars = bars.filter(b => !gaps.some(([a, c]) => b.x > a - 8 && b.x <= c + 45));
+  bars = [...bars, ...gaps.map(([a]) => ({ x: a, x1: a }))].sort((a, b) => a.x - b.x);
   for (const b of bars) {
     if (b.x <= staff.x0 + 3) continue;
     // 음자리표·조표·박자표 바로 뒤의 마디줄(도돌이표 시작 등)은 마디 끝이 아니라 시작
@@ -142,9 +161,10 @@ function stemsNear(staff, verts, barXs, side) {
 
 /** 빔: 가로로 긴 두꺼운 사각형(수평 빔). 기울어진 빔은 polys에 있으므로 함께 본다 */
 function beamsOf(page) {
-  const out = page.rects.filter(r => r.y1 - r.y0 >= 0.9 && r.y1 - r.y0 <= 2.4 && r.x1 - r.x0 > 2)
+  // 짧은 빔 조각(점8분+16분의 16분 꼬리 빔)도 포함하도록 폭 1.2pt부터
+  const out = page.rects.filter(r => !isWhite(r.fill) && r.y1 - r.y0 >= 0.9 && r.y1 - r.y0 <= 2.4 && r.x1 - r.x0 > 1.2)
     .map(r => ({ x0: r.x0, x1: r.x1, y0: r.y0, y1: r.y1 }));
-  for (const p of page.polys) if (!p.curved && p.pts.length >= 4 && p.bbox[2] - p.bbox[0] > 2 && p.bbox[3] - p.bbox[1] < 12)
+  for (const p of page.polys) if (!isWhite(p.fill) && !p.curved && p.pts.length >= 4 && p.bbox[2] - p.bbox[0] > 2 && p.bbox[3] - p.bbox[1] < 12)
     out.push({ x0: p.bbox[0], x1: p.bbox[2], y0: p.bbox[1], y1: p.bbox[3], poly: p });
   // 기울어진 빔은 기호처럼 "이동 + 평행사변형"으로 그려지기도 한다
   for (const g of page.glyphs) {
@@ -289,11 +309,7 @@ export function parseTabStaff(page, staff, glyphs, verts, beams, bars) {
     if (best) best.dots = 1;
   }
   // 셋잇단: '3' 아래(위)의 빔으로 묶인 기둥들
-  for (const t of tuplets) {
-    const cx = (t.bbox[0] + t.bbox[2]) / 2;
-    const grp = events.filter(e => e.stem && Math.abs(e.x - cx) < 9).slice(0, 3);
-    grp.forEach(e => (e.tuplet = 3));
-  }
+  for (const t of tuplets) markTuplet(events, t);
   // 마디별로 나누고, 숫자 없는 기둥은 앞 화음 반복
   const measures = [];
   const edges = measureEdges(staff, bars);
@@ -316,8 +332,44 @@ export function parseTabStaff(page, staff, glyphs, verts, beams, bars) {
     if (ev) ev.tremolo = 16; else signs.push(q);
   }
   applyRepeatSigns(measures, edges, signs);
+  const bigParens = mine.filter(q => q.cls === "paren" && q.bbox[3] - q.bbox[1] > g * 2);
+  measures.forEach(m => fixOverfull(m, bigParens));
   measures.forEach((m, i) => fillAmbiguous(m, edges[i + 1]));
   return measures;
+}
+
+/**
+ * 마디가 넘칠 때의 보정
+ *  1) "( … ) 2×" 괄호: 반복할 때만 바꿔 치는 부분이므로 괄호 안 음을 뺀다
+ *  2) 기둥 없는 긴 음(동그라미 TAB 등)이 하나면 마디 남은 길이에 맞춘다 (온음표/점2분/2분/4분)
+ *  3) 4/4에서 점온음표는 있을 수 없으므로(도돌이표 점 오인) 점을 뗀다
+ */
+export function fixOverfull(m, parens, full = 1) {
+  if (measureLength(m) <= full + 1e-6) return;
+  // 점8분 바로 옆의 8분은 16분 (짧은 빔 조각을 놓친 경우): 점8분+16분 / 16분+점8분
+  const seq = [...m].filter(e => !e.rest).sort((a, b) => a.x - b.x);
+  for (let i = 0; i + 1 < seq.length && measureLength(m) > full + 1e-6; i++) {
+    const a = seq[i], b = seq[i + 1];
+    if (!a.stem || !b.stem || a.dur !== 8 || b.dur !== 8) continue;
+    if (a.dots && !b.dots) b.dur = 16;
+    else if (b.dots && !a.dots) a.dur = 16;
+  }
+  if (measureLength(m) <= full + 1e-6) return;
+  for (const e of m) if (e.dur === 1 && e.dots && full <= 1) e.dots = 0;
+  if (measureLength(m) <= full + 1e-6) return;
+  const open = parens.filter(q => q.x > (m.x0 ?? -1e9) && q.x < (m.x1 ?? 1e9)).sort((a, b) => a.x - b.x)[0];
+  if (open) {
+    const keep = m.filter(e => e.x < open.bbox[0]);
+    if (keep.length && measureLength(keep) <= full + 1e-6) m.splice(0, m.length, ...keep);
+  }
+  const loose = m.filter(e => !e.stem && !e.rest && e.dur === 1);
+  if (loose.length === 1 && measureLength(m) > full + 1e-6) {
+    const others = measureLength(m.filter(e => e !== loose[0]));
+    const left = full - others;
+    const opts = [[1, 0], [2, 1], [2, 0], [4, 1], [4, 0], [8, 0]];
+    const hit = opts.find(([d, dot]) => Math.abs((1 / d) * (dot ? 1.5 : 1) - left) < 1e-6);
+    if (hit) { loose[0].dur = hit[0]; loose[0].dots = hit[1]; }
+  }
 }
 
 /**
@@ -390,6 +442,7 @@ export function rectRests(page, staff, verts) {
   const out = [], g = staff.gap, lines = staff.lines;
   const mid = lines[Math.floor((lines.length - 1) / 2)];
   for (const r of page.rects) {
+    if (isWhite(r.fill)) continue;
     const h = r.y1 - r.y0, w = r.x1 - r.x0;
     if (h < 1.2 || h > g * 0.75 || w < 3 || w > 9 || r.x0 < staff.x0 + 10 || r.x1 > staff.x1) continue;
     if (r.y0 < staff.top - 0.3 || r.y1 > staff.bottom + 0.3) continue;
@@ -401,6 +454,25 @@ export function rectRests(page, staff, verts) {
     out.push({ x: (r.x0 + r.x1) / 2, dur: whole ? 1 : 2, dots: 0, rest: true, notes: [], whole });
   }
   return out;
+}
+
+/**
+ * 셋잇단 "3": 숫자 가운데에 가장 가까운, 길이가 같은 연속 3개 음에 표시한다
+ * (8분 셋잇단은 좁고 4분 셋잇단은 넓게 퍼져 있으므로 거리 대신 순서로 고른다)
+ */
+function markTuplet(events, t) {
+  const cx = (t.bbox[0] + t.bbox[2]) / 2;
+  const evs = events.filter(e => !e.tuplet).sort((a, b) => a.x - b.x);
+  let best = null, bd = Infinity;
+  for (let i = 0; i + 2 < evs.length; i++) {
+    const grp = evs.slice(i, i + 3);
+    if (!grp.every(e => e.dur === grp[0].dur)) continue;
+    const mid = (grp[0].x + (grp[2].x1 ?? grp[2].x)) / 2;
+    const span = (grp[2].x1 ?? grp[2].x) - grp[0].x;
+    const d = Math.abs(mid - cx);
+    if (d < bd && d < Math.max(8, span * 0.6)) { bd = d; best = grp; }
+  }
+  if (best) best.forEach(e => (e.tuplet = 3));
 }
 
 /** 사건 길이 합 (온음표 = 1) */
@@ -422,10 +494,10 @@ const STEP_NAMES = ["C", "D", "E", "F", "G", "A", "B"];
 
 /** 보표 맨 앞의 음자리표 */
 export function clefOf(staff, glyphs) {
-  const c = glyphs.filter(q => (q.cls === "clef_g" || q.cls === "clef_f") && q.x < staff.x0 + 30 &&
+  const c = glyphs.filter(q => (q.cls === "clef_g" || q.cls === "clef_f" || q.cls === "clef_g8") && q.x < staff.x0 + 30 &&
     (q.bbox[1] + q.bbox[3]) / 2 > staff.top - staff.gap && (q.bbox[1] + q.bbox[3]) / 2 < staff.bottom + staff.gap)
     .sort((a, b) => a.x - b.x)[0];
-  return c ? (c.cls === "clef_f" ? "F" : "G") : null;
+  return c ? (c.cls === "clef_f" ? "F" : c.cls === "clef_g8" ? "G8" : "G") : null;
 }
 
 /** 보표 맨 앞(음자리표 바로 뒤)의 조표: 샵/플랫 개수 (+는 샵, -는 플랫) */
@@ -444,7 +516,8 @@ function pitchAt(staff, cy, clef) {
   const half = staff.gap / 2;
   const n = Math.round((staff.bottom - cy) / half); // 맨 아랫줄 = 0
   // 높은음자리표 맨 아랫줄 = E4, 낮은음자리표 = G2
-  const base = clef === "F" ? { step: 4, oct: 2 } : { step: 2, oct: 4 };
+  // 8 아래 높은음자리표(남성 보컬 등)는 한 옥타브 낮게 소리 난다
+  const base = clef === "F" ? { step: 4, oct: 2 } : clef === "G8" ? { step: 2, oct: 3 } : { step: 2, oct: 4 };
   const idx = base.step + n + base.oct * 7;
   return { step: STEP_NAMES[((idx % 7) + 7) % 7], oct: Math.floor(idx / 7), pos: n };
 }
@@ -540,10 +613,7 @@ export function parseStdStaff(page, staff, glyphs, verts, beams, bars, opts = {}
     if (best) best.dots = 1;
   }
   // 셋잇단
-  for (const t of near.filter(q => q.cls === "tuplet3")) {
-    const cx = (t.bbox[0] + t.bbox[2]) / 2;
-    events.filter(e => e.stem && Math.abs(e.x - cx) < 10).slice(0, 3).forEach(e => (e.tuplet = 3));
-  }
+  for (const t of near.filter(q => q.cls === "tuplet3")) markTuplet(events, t);
   // 임시표(마디 안에서 같은 음에 계속 적용) + 조표
   const accs = near.filter(q => q.cls === "sharp" || q.cls === "flat" || q.cls === "natural");
   const keyAlter = {};
@@ -588,6 +658,9 @@ export function parseStdStaff(page, staff, glyphs, verts, beams, bars, opts = {}
   }
   const signs = near.filter(q => q.cls === "repeat1" || q.cls === "repeat2").filter(q => !events.some(e => e.stem && Math.abs(e.stem.x - (q.bbox[0] + q.bbox[2]) / 2) < 2.5));
   applyRepeatSigns(measures, edges, signs);
+  const bigParens = near.filter(q => q.cls === "paren" && q.bbox[3] - q.bbox[1] > g * 2);
+  // 2성부로 나눌 수 있는 마디는 길이가 넘치는 게 정상이므로 건드리지 않는다
+  measures.forEach(m => { if (!opts.drums && !m.some(e => e.voice === 2) && !splitVoices(m, 1)) fixOverfull(m, bigParens); });
   measures.forEach((m, i) => fillAmbiguous(m, edges[i + 1]));
   measures.clef = clef; measures.key = key;
   return measures;
@@ -652,7 +725,7 @@ export function partsOfSystem(sys, glyphs) {
   }
   for (let i = 0; i + 1 < parts.length; i++) {
     const a = parts[i], b = parts[i + 1];
-    if (a.kind === "std" && b.kind === "std" && a.clef === "G" && b.clef === "F") {
+    if (a.kind === "std" && b.kind === "std" && a.clef === "G" && b.clef === "F" && !a.label?.match(/^(Vo|Cho)/)) {
       a.kind = "piano"; a.lower = b.std; parts.splice(i + 1, 1);
     }
   }
@@ -677,20 +750,71 @@ export function timeSigAt(staff, glyphs, x0, x1) {
  * 페이지들(기호 분류가 끝난 extractPage 결과)을 파트별 마디 목록으로
  * @returns {{ parts, bars: [{ts:[n,d]}], report: string[] }}
  */
+/**
+ * 1번 괄호는 여러 단·페이지에 걸쳐 이어질 수 있다(다음 단에는 숫자 없이 선만 계속됨).
+ * 1번 괄호가 시작된 마디부터 도돌이표 끝 마디까지를 모두 1번 괄호로 본다
+ * (그 바로 다음에 2번 괄호가 올 때만).
+ */
+function extendVoltas(bars) {
+  for (let i = 0; i < bars.length; i++) {
+    if (bars[i].nav?.volta !== 1) continue;
+    let j = i;
+    while (j < bars.length && !bars[j].nav?.repeatEnd && !(j > i && bars[j].nav?.volta === 2)) j++;
+    if (j < bars.length && bars[j].nav?.repeatEnd && bars[j + 1]?.nav?.volta === 2)
+      for (let k = i; k <= j; k++) bars[k].nav.volta = 1;
+    i = j;
+  }
+}
+
+/** 단의 보표 구성 문자열 (S5 = 5줄 오선, T6 = 6줄 TAB …) */
+function systemSig(sys) {
+  const stdGap = Math.min(...sys.staves.map(s => s.gap));
+  return sys.staves.map(s => (s.gap / stdGap > 1.15 ? "T" : "S") + s.count).join("");
+}
+
+/**
+ * 페이지들(기호 분류가 끝난 extractPage 결과)을 파트별 마디 목록으로.
+ * 가장 많이 나오는 보표 구성의 단들을 본편으로 보고, 구성이 다른 단(키보드 파트 부록 등)은
+ * 따로 해석해서 마디 수가 본편과 같으면 함께 연주되는 추가 파트로 붙인다.
+ */
 export function parseBandScore(pages) {
+  const all = [];
+  pages.forEach((pg, pi) => {
+    const verts = verticalRects(pg);
+    for (const sys of groupSystems(findStaves(pg), verts).filter(s => s.staves.length > 3)) all.push({ pg, pi, sys, sig: systemSig(sys) });
+  });
+  const count = {};
+  for (const e of all) count[e.sig] = (count[e.sig] || 0) + 1;
+  const mainSig = Object.keys(count).sort((a, b) => count[b] - count[a])[0];
+  const main = parseSystems(all.filter(e => e.sig === mainSig));
+  extendVoltas(main.bars);
+  const rest = all.filter(e => e.sig !== mainSig);
+  if (rest.length) {
+    const extra = parseSystems(rest);
+    if (extra.bars.length === main.bars.length) {
+      for (const p of extra.parts) { p.extra = true; main.parts.push(p); }
+      main.report.push(`부록 ${extra.parts.length}파트를 함께 붙였습니다.`);
+    } else {
+      main.report.push(`보표 구성이 다른 부분(${rest.length}단, ${extra.bars.length}마디)은 본편(${main.bars.length}마디)과 길이가 달라 뺐습니다.`);
+    }
+  }
+  return main;
+}
+
+function parseSystems(list) {
   const parts = [];      // 파트 순서는 첫 단 기준
   const bars = [];
   const report = [];
   const layoutCache = new Map();
   let ts = [4, 4];
-  pages.forEach((pg, pi) => {
-    const verts = verticalRects(pg), beams = beamsOf(pg);
-    const systems = groupSystems(findStaves(pg), verts).filter(s => s.staves.length > 3);
-    for (const sys of systems) {
+  const beamCache = new Map();
+  for (const { pg, pi, sys, sig } of list) {
+    {
+      const verts = verticalRects(pg);
+      if (!beamCache.has(pg)) beamCache.set(pg, beamsOf(pg));
+      const beams = beamCache.get(pg);
       const sb = systemBarlines(sys, verts);
       // 보표 구성이 같은 단은 처음 판정한 파트 구성을 그대로 쓴다 (단마다 음자리표 인식 차이로 흔들리지 않게)
-      const stdGap = Math.min(...sys.staves.map(s => s.gap));
-      const sig = sys.staves.map(s => (s.gap / stdGap > 1.15 ? "T" : "S") + s.count).join("");
       const layout = layoutCache.get(sig) || partsOfSystem(sys, pg.glyphs);
       layoutCache.set(sig, layout);
       const edges = measureEdges(sys.staves[0], sb);
@@ -729,7 +853,7 @@ export function parseBandScore(pages) {
         parts.forEach(pp => { while (pp.measures.length < bars.length) pp.measures.push([]); });
       }
     }
-  });
+  }
   // 두 마디 반복 기호
   for (const p of parts) p.measures.forEach((m, i) => {
     if (m.repeatOf2 && i >= 2) {
@@ -954,16 +1078,26 @@ function fnv(str) {
   for (let i = 0; i < str.length; i++) h = Math.imul(h ^ str.charCodeAt(i), 16777619) >>> 0;
   return h.toString(36);
 }
-/** 모양 특징값: [명령 순서 해시, 좌표 수, 경계상자, 표본 좌표 4개] */
+/**
+ * 모양 특징값 (크기와 무관): [명령 순서 해시, 좌표 수, 크기, 가로세로비, 정규화한 표본 좌표 8개]
+ * 같은 악보 안에서도 페이지마다 축척이 조금씩 달라 같은 기호의 좌표가 달라지므로,
+ * 기호 자체의 크기로 나눈 좌표로 비교한다.
+ */
 export function shapeFeature(ops, flat) {
   const xs = flat.filter((_, i) => i % 2 === 0), ys = flat.filter((_, i) => i % 2 === 1);
-  const r = v => Math.round(v * 100) / 100;
+  const x0 = Math.min(...xs), y0 = Math.min(...ys), w = Math.max(...xs) - x0, h = Math.max(...ys) - y0;
+  const size = Math.max(w, h) || 1;
+  const r = v => Math.round(v * 1000) / 1000;
   const n = flat.length;
-  const pick = [Math.floor(n * 0.2), Math.floor(n * 0.45), Math.floor(n * 0.7), n - 1].map(i => r(flat[Math.max(0, i)] ?? 0));
-  return [fnv(ops), n, r(Math.min(...xs)), r(Math.min(...ys)), r(Math.max(...xs)), r(Math.max(...ys)), ...pick];
+  const samples = [];
+  for (const f of [0.1, 0.25, 0.4, 0.55, 0.7, 0.85]) {
+    const i = Math.floor(n * f / 2) * 2;
+    samples.push(r((flat[i] - x0) / size), r((flat[i + 1] - y0) / size));
+  }
+  return [fnv(ops), n, r(size), r(h / (w || 1e-6) > 50 ? 50 : h / (w || 1e-6)), ...samples];
 }
-/** 사전으로 기호 분류기를 만든다 */
-export function makeClassifier(table, tol = 0.12) {
+/** 사전으로 기호 분류기를 만든다 (모양이 같으면 크기가 달라도 같은 기호, 여러 개면 크기가 가장 가까운 것) */
+export function makeClassifier(table, tol = 0.035) {
   const byKey = new Map();
   for (const row of table) {
     const key = row[1] + ":" + row[2];
@@ -973,12 +1107,18 @@ export function makeClassifier(table, tol = 0.12) {
   return segs => {
     const ops = segs.map(g => g.op).join(""), flat = segs.flatMap(g => g.pts);
     const f = shapeFeature(ops, flat);
+    let best = null, bd = Infinity;
     for (const row of byKey.get(f[0] + ":" + f[1]) || []) {
+      const ar = row[4], far = f[3];
+      if (Math.abs(Math.log((ar + 0.01) / (far + 0.01))) > 0.12) continue;
       let ok = true;
-      for (let i = 2; i < f.length; i++) if (Math.abs(f[i] - row[i + 1]) > tol) { ok = false; break; }
-      if (ok) return row[0];
+      for (let i = 4; i < f.length; i++) if (Math.abs(f[i] - row[i + 1]) > tol) { ok = false; break; }
+      if (!ok) continue;
+      const d = Math.abs(Math.log(row[3] / f[2]));
+      // 크기가 너무 다르면 다른 기호(예: 스타카토 점과 점음표의 점)
+      if (d < 0.29 && d < bd) { bd = d; best = row[0]; }
     }
-    return null;
+    return best;
   };
 }
 
