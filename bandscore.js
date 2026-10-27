@@ -182,7 +182,7 @@ function beamsOf(page) {
     const ops = g.segs.map(q => q.op).join("");
     if (!/^0111(3)?$/.test(ops)) continue;
     const w = g.bbox[2] - g.bbox[0], h = g.bbox[3] - g.bbox[1];
-    if (w < 3 || h > 12) continue;
+    if (w < 2.2 || h > 12) continue; // 16분 꼬리 빔 조각은 폭이 2.8pt 정도
     // 세로로 평행한 두 변(같은 x 위에 두 점씩)이어야 빔
     const pts = g.segs.filter(q => q.op <= 1).map(q => q.pts[0]);
     const xs = [...new Set(pts.map(v => Math.round(v * 10)))];
@@ -309,7 +309,7 @@ export function parseTabStaff(page, staff, glyphs, verts, beams, bars) {
     const d = { rest4: 4, rest8: 8, rest16: 16 }[q.cls];
     if (d) events.push({ x: (q.bbox[0] + q.bbox[2]) / 2, dur: d, dots: 0, rest: true, notes: [] });
   }
-  events.push(...rectRests(page, staff, verts));
+  events.push(...rectRests(page, staff, verts).filter(r => !r.voice)); // 오선 바깥 쉼표는 일반 보표에만
   // 점: 사건 오른쪽 가까이
   events.sort((a, b) => a.x - b.x);
   for (const d of dots) {
@@ -455,13 +455,16 @@ export function rectRests(page, staff, verts) {
     if (isWhite(r.fill)) continue;
     const h = r.y1 - r.y0, w = r.x1 - r.x0;
     if (h < 1.2 || h > g * 0.75 || w < 3 || w > 9 || r.x0 < staff.x0 + 10 || r.x1 > staff.x1) continue;
-    if (r.y0 < staff.top - 0.3 || r.y1 > staff.bottom + 0.3) continue;
+    // 2성부 마디의 쉼표는 오선 바깥에 붙는다: 위 성부는 맨 윗줄에 앉은 2분쉼표, 아래 성부는 맨 아랫줄에 매달린 온쉼표
+    const above = Math.abs(r.y1 - staff.top) < 0.45 && r.y0 < staff.top - 0.3;
+    const below = Math.abs(r.y0 - staff.bottom) < 0.45 && r.y1 > staff.bottom + 0.3;
+    if (!above && !below && (r.y0 < staff.top - 0.3 || r.y1 > staff.bottom + 0.3)) continue;
     const hang = lines.find(y => Math.abs(r.y0 - y) < 0.45);   // 줄 아래에 매달림 = 온쉼표
     const sit = lines.find(y => Math.abs(r.y1 - y) < 0.45);    // 줄 위에 앉음 = 2분쉼표
     if (hang === undefined && sit === undefined) continue;
     if (verts.some(v => v.w < 0.8 && v.x > r.x0 - 0.6 && v.x < r.x1 + 0.6 && v.y0 < r.y1 && v.y1 > r.y0)) continue;
-    const whole = hang !== undefined && hang <= mid + 0.5;
-    out.push({ x: (r.x0 + r.x1) / 2, dur: whole ? 1 : 2, dots: 0, rest: true, notes: [], whole });
+    const whole = below || (!above && hang !== undefined && hang <= mid + 0.5);
+    out.push({ x: (r.x0 + r.x1) / 2, dur: whole ? 1 : 2, dots: 0, rest: true, notes: [], whole, voice: above ? 1 : below ? 2 : 0 });
   }
   return out;
 }
@@ -490,7 +493,7 @@ export function measureLength(events) {
   let sum = 0;
   for (const e of events) {
     let v = 1 / e.dur;
-    if (e.dots === 1) v *= 1.5;
+    if (e.dots) v *= e.dots === 2 ? 1.75 : 1.5;
     if (e.tuplet === 3) v *= 2 / 3;
     sum += v;
   }
@@ -499,7 +502,7 @@ export function measureLength(events) {
 
 /* ------------------------------------------------- 4) 오선보(보컬·건반) 해석 */
 
-const HEADS = new Set(["head_black", "head_half", "head_whole", "head_x", "slash"]);
+const HEADS = new Set(["head_black", "head_half", "head_whole", "head_x", "head_xo", "slash"]);
 const STEP_NAMES = ["C", "D", "E", "F", "G", "A", "B"];
 
 /** 보표 맨 앞의 음자리표 */
@@ -562,7 +565,7 @@ export function parseStdStaff(page, staff, glyphs, verts, beams, bars, opts = {}
     let best = null, bd = 1.3;
     for (const s of stems) {
       // 보통 머리는 가장자리에, X 머리는 가운데에 기둥이 붙는다
-      const dx = h.cls === "head_x" ? Math.abs(s.x - (h.bbox[0] + h.bbox[2]) / 2)
+      const dx = h.cls === "head_x" || h.cls === "head_xo" ? Math.abs(s.x - (h.bbox[0] + h.bbox[2]) / 2)
         : Math.min(Math.abs(s.x - h.bbox[2]), Math.abs(s.x - h.bbox[0]));
       if (dx < bd && s.y0 <= cy + g * 0.8 && s.y1 >= cy - g * 0.8) { bd = dx; best = s; }
     }
@@ -574,7 +577,7 @@ export function parseStdStaff(page, staff, glyphs, verts, beams, bars, opts = {}
   const mkNotes = hs => hs.map(h => {
     const cy = (h.bbox[1] + h.bbox[3]) / 2;
     const p = pitchAt(staff, cy, clef);
-    return { ...p, x0: h.bbox[0], x1: h.bbox[2], cy, xhead: h.cls === "head_x", slash: h.cls === "slash" };
+    return { ...p, x0: h.bbox[0], x1: h.bbox[2], cy, xhead: h.cls === "head_x" || h.cls === "head_xo", ring: h.cls === "head_xo", slash: h.cls === "slash" };
   });
   for (const [s, hs] of groups) {
     const cyAvg = hs.reduce((a, h) => a + (h.bbox[1] + h.bbox[3]) / 2, 0) / hs.length;
@@ -582,7 +585,7 @@ export function parseStdStaff(page, staff, glyphs, verts, beams, bars, opts = {}
     const tip = up ? s.y0 : s.y1;
     let n = beamCount(s, beams, tip);
     n += flags.filter(f => Math.abs(f.bbox[0] - s.x) < 1.2 && f.bbox[1] < tip + 7 && f.bbox[3] > tip - 7).length;
-    const hollow = hs.some(h => h.cls === "head_half");
+    const hollow = hs.some(h => h.cls === "head_half" || h.cls === "head_xo");
     const dur = n > 0 ? 4 * 2 ** n : hollow ? 2 : 4;
     events.push({ x: Math.min(...hs.map(h => h.bbox[0])), x1: Math.max(...hs.map(h => h.bbox[2])), dur, dots: 0,
       notes: mkNotes(hs), stem: s, voice: up ? 1 : 2 });
@@ -610,7 +613,7 @@ export function parseStdStaff(page, staff, glyphs, verts, beams, bars, opts = {}
     if (d && cy > staff.top - g && cy < staff.bottom + g)
       events.push({ x: q.bbox[0], x1: q.bbox[2], cy, dur: d, dots: 0, rest: true, notes: [], voice: cy < (staff.top + staff.bottom) / 2 - g ? 1 : cy > (staff.top + staff.bottom) / 2 + g ? 2 : 0 });
   }
-  for (const r of rectRests(page, staff, verts)) events.push({ ...r, x1: r.x + 2, voice: 0 });
+  for (const r of rectRests(page, staff, verts)) events.push({ ...r, x1: r.x + 2 });
   // 점
   const dots = near.filter(q => q.cls === "dot");
   events.sort((a, b) => a.x - b.x);
@@ -620,7 +623,13 @@ export function parseStdStaff(page, staff, glyphs, verts, beams, bars, opts = {}
     // 점은 높이가 맞는 음(또는 쉼표) 오른쪽에만 붙는다
     for (const e of events) if (e.x1 + 0.2 < dx && dx - e.x1 < 6 &&
       (e.rest ? e.cy !== undefined && Math.abs(e.cy - dy) < g * 1.5 : e.notes.some(n => Math.abs(n.cy - dy) < g * 0.9))) best = e;
-    if (best) best.dots = 1;
+    // 화음의 점은 같은 x에 여러 개. 가로로 다른 위치에 두 번째 점이 있으면 겹점
+    if (best) (best.dotXs ||= []).push(dx);
+  }
+  for (const e of events) if (e.dotXs) {
+    const xs = e.dotXs.sort((a, b) => a - b);
+    e.dots = xs.some((x, i) => i && x - xs[i - 1] > 0.8) ? 2 : 1;
+    delete e.dotXs;
   }
   // 셋잇단
   for (const t of near.filter(q => q.cls === "tuplet3")) markTuplet(events, t);
@@ -644,6 +653,13 @@ export function parseStdStaff(page, staff, glyphs, verts, beams, bars, opts = {}
     const poly = m.some(a => !a.rest && a.voice === 1 && m.some(b => !b.rest && b.voice === 2 && Math.abs(a.x - b.x) < 2.5));
     for (const e of m) e.stemVoice = e.voice; // 기둥 방향은 나중에 성부 나누기에 다시 쓴다
     if (!poly && !opts.drums) for (const e of m) e.voice = 1;
+    // 드럼도 한 방향 기둥만 있는 마디(한 줄 타악기 등)는 가운데 쉼표까지 한 성부로
+    if (!poly && opts.drums && new Set(m.map(e => e.voice).filter(Boolean)).size <= 1) for (const e of m) e.voice = 1;
+    // 위 성부가 오선 위 쉼표로 따로 적힌 마디: 가운데 쉼표는 길이가 모자란 쪽 성부 것
+    else if (!poly && opts.drums) {
+      const short = measureLength(m.filter(e => e.voice === 1)) <= measureLength(m.filter(e => e.voice === 2)) ? 1 : 2;
+      for (const e of m) if (!e.voice) e.voice = short;
+    }
     measures.push(m);
   }
   // 머리 없는 기둥은 앞 화음 반복
@@ -744,13 +760,18 @@ export function partsOfSystem(sys, glyphs) {
 
 /** 박자표: 보표 앞쪽의 C 또는 위아래 숫자 */
 export function timeSigAt(staff, glyphs, x0, x1) {
-  const ts = glyphs.filter(q => q.cls && q.cls.startsWith("ts") && q.x > x0 - 1 && q.x < x1 &&
+  // 박자표 숫자는 1·2번 괄호 숫자, 긴 쉼표 숫자와 같은 글자일 수 있다(v2, n4 등). 오선 안에 위아래로 겹쳐 있으면 박자표
+  const num = q => +(/^(?:ts|n|v)(\d+)$/.exec(q.cls) || [])[1];
+  const ts = glyphs.filter(q => q.cls && (q.cls === "tsC" || num(q)) && q.x > x0 - 1 && q.x < x1 &&
     (q.bbox[1] + q.bbox[3]) / 2 > staff.top - 1 && (q.bbox[1] + q.bbox[3]) / 2 < staff.bottom + 1);
-  if (!ts.length) return null;
-  if (ts.some(q => q.cls === "tsC")) return [4, 4];
   const mid = (staff.top + staff.bottom) / 2;
-  const top = ts.find(q => (q.bbox[1] + q.bbox[3]) / 2 < mid), bot = ts.find(q => (q.bbox[1] + q.bbox[3]) / 2 > mid);
-  if (top && bot) return [+top.cls.slice(2), +bot.cls.slice(2)];
+  // 짧은 마디에는 박자표와 마디 끝 예고 박자표가 함께 들어올 수 있으므로 왼쪽 것부터
+  for (const top of ts.sort((a, b) => a.bbox[0] - b.bbox[0])) {
+    if (top.cls === "tsC") return [4, 4];
+    if ((top.bbox[1] + top.bbox[3]) / 2 > mid) continue;
+    const bot = ts.find(q => (q.bbox[1] + q.bbox[3]) / 2 > mid && Math.abs(q.bbox[0] + q.bbox[2] - top.bbox[0] - top.bbox[2]) < 4);
+    if (bot) return [num(top), num(bot)];
+  }
   return null;
 }
 
@@ -892,10 +913,13 @@ function parseSystems(list) {
       const nMeasures = edges.length - 1;
       // 박자표 (첫 보표의 각 마디 앞부분)
       const tsList = [];
+      let courtesy = null;
       for (let i = 0; i < nMeasures; i++) {
-        const t = timeSigAt(sys.staves[0], pg.glyphs, edges[i], Math.min(edges[i] + 40, edges[i + 1]));
+        // 마디 끝 겹세로줄 바로 앞의 박자표는 다음 마디부터 (예고 박자표)
+        const t = timeSigAt(sys.staves[0], pg.glyphs, edges[i], Math.min(edges[i] + 40, edges[i + 1] - 9)) || courtesy;
         if (t) ts = t;
         tsList.push(ts.slice());
+        courtesy = timeSigAt(sys.staves[0], pg.glyphs, edges[i + 1] - 9, edges[i + 1]);
       }
       // 도돌이표 점을 먼저 골라내야 점음표의 점으로 잘못 붙지 않는다
       const rdots = markRepeatDots(sys, pg.glyphs, verts);
@@ -1026,7 +1050,7 @@ function restsFor(len) {
   }
   return out;
 }
-function evLen(e) { return (1 / e.dur) * (e.dots ? 1.5 : 1) * (e.tuplet === 3 ? 2 / 3 : 1); }
+function evLen(e) { return (1 / e.dur) * (e.dots === 2 ? 1.75 : e.dots ? 1.5 : 1) * (e.tuplet === 3 ? 2 / 3 : 1); }
 
 /** 마디 길이를 박자에 맞춘다: 모자라면 쉼표로 채우고, 넘치면 넘치는 사건을 버린다 */
 function fitMeasure(evs, full) {
@@ -1054,14 +1078,14 @@ function beatTex(e, kind, strings = 6, perc = false) {
     const ns = [...new Set(e.notes.map(n => `${n.dead ? "x" : n.fret}.${n.string}${n.tie ? "{t}" : ""}`))];
     body = ns.length > 1 ? `(${ns.join(" ")})` : ns[0];
   } else if (kind === "drums") {
-    const ns = [...new Set(e.notes.map(n => perc ? (n.xhead ? "CabasaHit" : "TambourineHit") : drumArticulation(n.pos, n.xhead)))];
+    const ns = [...new Set(e.notes.map(n => perc ? (n.ring ? "CrashMediumHit" : n.xhead ? "CabasaHit" : "TambourineHit") : drumArticulation(n.pos, n.xhead)))];
     body = ns.length > 1 ? `(${ns.join(" ")})` : ns[0];
   } else {
     const ns = [...new Set(e.notes.map(noteTex))]; // 같은 음이 겹쳐 적힌 경우(두 성부 유니즌) 하나로
     body = `(${ns.join(" ")})`;
   }
   const fx = [];
-  if (e.dots) fx.push("d");
+  if (e.dots) fx.push(e.dots === 2 ? "dd" : "d");
   if (e.tuplet === 3) fx.push("tu 3");
   if (e.tremolo && !e.rest) fx.push("tp 16");
   // 음표 효과({t})와 박 효과가 함께 있을 때 헷갈리지 않도록 화음 괄호로 감싼다
