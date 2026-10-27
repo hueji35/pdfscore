@@ -1,0 +1,33 @@
+homr-web is a port to TypeScript of homr, "Homer's Optical Music Recognition",
+by Christian Liebhardt, https://github.com/liebharc/homr, licensed under the
+GNU Affero General Public License version 3. This port reproduces homr
+release 0.7.0 (commit 8b5dcf7d7bdd1a47911dc0c661c573b957271eab) and is
+distributed under the same licence; see LICENSE.
+
+The models the port runs are homr's own, downloaded unchanged from the homr
+"onnx_checkpoints" release and identified by name and SHA-256 in
+test/golden/*/meta.json. homr builds on:
+
+- oemer, https://github.com/BreezeWhite/oemer, MIT licence: the
+  segmentation models.
+- Polyphonic-TrOMR, https://github.com/NetEase/Polyphonic-TrOMR, Apache
+  licence 2.0: the transformer.
+
+Their authors ask that research use cite them.
+
+At run time the port loads, as ordinary npm dependencies under their own
+licences: onnxruntime-web (MIT), @techstark/opencv-js, a build of OpenCV
+(Apache licence 2.0), and delaunator (ISC) with robust-predicates (Unlicense).
+
+The chord and title OCR ports parts of two more works:
+
+- RapidOCR, https://github.com/RapidAI/RapidOCR, Apache licence 2.0: the
+  pipeline of release 3.9.2 (preprocessing, DBPostProcess, the classifier
+  and recogniser batching, CTC decoding), itself derived from PaddleOCR,
+  https://github.com/PaddlePaddle/PaddleOCR, Apache licence 2.0. Its three
+  models, PP-OCRv6 small detection and recognition and the v2.0 mobile
+  direction classifier, are PaddleOCR's, Apache licence 2.0, served
+  unchanged as rapidocr ships them.
+- Clipper 6.4.2 by Angus Johnson, http://www.angusj.com/delphi/clipper.php,
+  Boost Software Licence 1.0: the polygon offset with round joins
+  (src/ocr/clipper-offset.ts).

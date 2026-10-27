@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#1f2430">
+<title>PDFScore 악보 플레이어</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="toolbar">
+  <div class="group">
+    <span class="logo">🎼 PDFScore</span>
+    <label class="btn primary" title="MusicXML(.musicxml/.xml/.mxl), PDF, 이미지 열기">
+      📂 <span class="lbl">열기</span>
+      <input id="fileInput" type="file" hidden
+        accept=".musicxml,.xml,.mxl,.pdf,.png,.jpg,.jpeg,.tif,.tiff,.bmp,application/pdf,image/*">
+    </label>
+    <button id="demoBtn" class="btn" title="데모 악보 열기">🎵 <span class="lbl">데모</span></button>
+    <button id="saveBtn" class="btn" title="인식된 악보를 MusicXML로 저장" hidden>💾 <span class="lbl">저장</span></button>
+  </div>
+  <div class="group transport">
+    <button id="rewindBtn" class="btn icon" title="처음으로" disabled>⏮</button>
+    <button id="playBtn" class="btn icon play" title="재생/일시정지 (Space)" disabled>▶</button>
+    <button id="stopBtn" class="btn icon" title="정지" disabled>⏹</button>
+  </div>
+  <div class="group">
+    <label class="ctl" title="재생 속도">
+      <span>템포</span><span class="sm-only">♩</span>
+      <input id="tempo" type="range" min="25" max="200" step="5" value="100">
+      <output id="tempoOut">100%</output>
+    </label>
+    <div class="ctl zoom">
+      <button id="zoomOut" class="btn icon small" title="축소">−</button>
+      <output id="zoomVal">100%</output>
+      <button id="zoomIn" class="btn icon small" title="확대">＋</button>
+    </div>
+    <label class="ctl check" title="재생 위치를 따라 자동 스크롤">
+      <input id="autoScroll" type="checkbox" checked> <span class="lbl">자동 스크롤</span><span class="sm-only">↕</span>
+    </label>
+    <button id="partsBtn" class="btn" title="파트 패널 열기/닫기">🎻 <span class="lbl">파트</span></button>
+  </div>
+</header>
+
+<div class="seekbar">
+  <span id="timeCur">0:00</span>
+  <input id="seek" type="range" min="0" max="1000" value="0" step="1" disabled>
+  <span id="timeTotal">0:00</span>
+</div>
+
+<main>
+  <aside id="parts" class="parts">
+    <div class="parts-head">
+      <strong>파트</strong>
+      <div class="parts-all">
+        <button class="btn tiny" data-all="show">모두 보기</button>
+        <button class="btn tiny" data-all="sound">모두 소리</button>
+      </div>
+    </div>
+    <div class="parts-legend"><span>👁 악보 표시</span><span>🔊 소리</span></div>
+    <ul id="partList"><li class="empty">악보를 열면 파트 목록이 나타납니다.</li></ul>
+  </aside>
+  <div id="scoreWrap" class="score-wrap">
+    <div id="welcome" class="welcome">
+      <h1>악보 플레이어</h1>
+      <p>악보 파일을 여기에 끌어다 놓거나 <b>📂 열기</b>를 누르세요.</p>
+      <ul>
+        <li><b>MusicXML / MXL</b> — 바로 열립니다 (MuseScore, Finale, Sibelius, Dorico 등에서 내보내기).</li>
+        <li><b>PDF / 이미지(PNG·JPG)</b> — 이 기기 안에서 악보를 인식(OMR)해 변환합니다. 처음 한 번 인식 모델(약 130~190MB)을 내려받습니다.</li>
+      </ul>
+      <p>처음이라면 <button class="btn" id="demoBtn2">🎵 데모 악보</button>로 사용법을 확인해 보세요.</p>
+    </div>
+    <div id="score"></div>
+  </div>
+</main>
+
+<div id="overlay" class="overlay" hidden>
+  <div class="overlay-box">
+    <div class="spinner"></div>
+    <div class="overlay-text"><div id="overlayMsg">불러오는 중…</div>
+      <button id="cancelBtn" class="btn cancel" hidden>취소</button></div>
+  </div>
+</div>
+
+<dialog id="msgDialog">
+  <form method="dialog">
+    <h3 id="msgTitle"></h3>
+    <div id="msgBody"></div>
+    <menu><button class="btn primary" value="ok">확인</button></menu>
+  </form>
+</dialog>
+
+<div id="dropHint" class="drop-hint" hidden>여기에 놓으면 악보를 엽니다</div>
+<div id="toast" class="toast" hidden></div>
+
+<script src="lib/opensheetmusicdisplay.min.js"></script>
+<script src="lib/soundfont-player.min.js"></script>
+<script src="demo.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
