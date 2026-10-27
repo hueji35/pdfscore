@@ -195,7 +195,8 @@ export { beamsOf };
 
 /** 기둥 끝에 걸린 빔 개수 (빔 사이 간격 이상 떨어진 것은 따로 셈) */
 function beamCount(stem, beams, tipY) {
-  const hits = beams.filter(b => stem.x >= b.x0 - 0.4 && stem.x <= b.x1 + 0.4 && Math.min(Math.abs(b.y0 - tipY), Math.abs(b.y1 - tipY), (b.y0 <= tipY && b.y1 >= tipY) ? 0 : 99) < 7.5)
+  // 빔은 기둥에 닿아 있어야 한다 (바로 위 보표의 빔을 세지 않도록)
+  const hits = beams.filter(b => stem.x >= b.x0 - 0.4 && stem.x <= b.x1 + 0.4 && b.y1 >= stem.y0 - 1.2 && b.y0 <= stem.y1 + 1.2 && Math.min(Math.abs(b.y0 - tipY), Math.abs(b.y1 - tipY), (b.y0 <= tipY && b.y1 >= tipY) ? 0 : 99) < 7.5)
     .map(b => (b.y0 + b.y1) / 2).sort((a, b) => a - b);
   let n = 0, last = -99;
   for (const y of hits) { if (y - last > 0.8) n++; last = y; }
@@ -206,19 +207,22 @@ function beamCount(stem, beams, tipY) {
  * TAB 보표 한 줄을 마디별 사건 목록으로
  * 사건: { x, dur(1,2,4,8,16,32), dots, notes:[{string, fret, dead, tie}], rest, tuplet, repeatPrev }
  */
-export function parseTabStaff(page, staff, glyphs, verts, beams, bars) {
+export function parseTabStaff(page, staff, glyphs, verts, beams, bars, fulls = []) {
   const g = staff.gap, lines = staff.lines;
   const barXs = bars.map(b => b.x);
   const mine = glyphs.filter(q => q.cls && inBand(q, staff, g * 2.5, g * 2.5));
   // 프렛 숫자 (두 자리는 붙여서)
   const digits = [];
   for (const q of mine) {
-    if (!/^d\d$/.test(q.cls) && q.cls !== "tab_x") continue;
+    if (!/^d\d$/.test(q.cls) && q.cls !== "tab_x" && q.cls !== "head_x") continue;
+    // TAB 줄 위의 X 머리도 데드 노트. 단 기둥이 닿은 것만 (코드 다이어그램의 뮤트 표시 X 제외)
+    if (q.cls === "head_x" && !verts.some(v => v.w < 0.8 && Math.abs(v.x - (q.bbox[0] + q.bbox[2]) / 2) < 1 &&
+      (Math.abs(v.y1 - q.bbox[1]) < 2.5 || Math.abs(v.y0 - q.bbox[3]) < 2.5))) continue;
     const cy = (q.bbox[1] + q.bbox[3]) / 2;
     let best = -1, bd = 1e9;
     lines.forEach((y, i) => { const d = Math.abs(y - cy); if (d < bd) { bd = d; best = i; } });
     if (bd > g * 0.45) continue;
-    digits.push({ x0: q.bbox[0], x1: q.bbox[2], string: best + 1, ch: q.cls === "tab_x" ? "x" : q.cls.slice(1) });
+    digits.push({ x0: q.bbox[0], x1: q.bbox[2], string: best + 1, ch: q.cls === "tab_x" || q.cls === "head_x" ? "x" : q.cls.slice(1) });
   }
   digits.sort((a, b) => a.string - b.string || a.x0 - b.x0);
   const frets = [];
@@ -235,21 +239,33 @@ export function parseTabStaff(page, staff, glyphs, verts, beams, bars) {
     const l = parens.some(p => p.bbox[2] <= f.x0 + 0.5 && f.x0 - p.bbox[2] < 2.5 && Math.abs((p.bbox[1] + p.bbox[3]) / 2 - lines[f.string - 1]) < g);
     if (l) f.tie = true;
   }
-  const circles = mine.filter(q => q.cls === "tab_circle");
+  // 동그라미 숫자. 여러 줄 화음을 감싼 긴 타원은 기호가 아니라 곡선 도형으로 그려진다
+  const circles = mine.filter(q => q.cls === "tab_circle").concat(page.polys.filter(p => p.curved && !isWhite(p.fill) &&
+    p.bbox[2] - p.bbox[0] < g * 4 && p.bbox[3] - p.bbox[1] > g * 1.5 && p.bbox[3] - p.bbox[1] < g * 7 &&
+    p.bbox[1] > staff.top - g * 2 && p.bbox[3] < staff.bottom + g * 2 && p.bbox[0] > staff.x0 && p.bbox[2] < staff.x1 &&
+    frets.some(f => f.x > p.bbox[0] && f.x < p.bbox[2] && lines[f.string - 1] > p.bbox[1] && lines[f.string - 1] < p.bbox[3])));
   // 기둥 (TAB은 보표 위쪽에 짧은 기둥)
   // 기둥: 보표 근처의 가는 세로선(마디줄 제외). 숫자와 짝이 맞으면 숫자에서 먼 쪽 끝이 빔이 달리는 끝.
   // 숫자 없는 기둥(앞 화음 반복)은 옆 보표 기둥과 헷갈리지 않도록 TAB 맨 윗줄/아랫줄에 딱 붙어 끝나는 것만.
   const stems = [];
   const cands = verts.filter(v => {
     const h = v.y1 - v.y0;
-    return v.w < 0.8 && h > 2 && h < staff.bottom - staff.top - 1 && v.x > staff.x0 && v.x < staff.x1 &&
+    return v.w < 0.8 && h > 2 && h < staff.bottom - staff.top + g * 3 && v.x > staff.x0 && v.x < staff.x1 &&
       !barXs.some(x => Math.abs(x - v.x) < 0.8) && v.y1 >= staff.top - g * 1.2 && v.y0 <= staff.bottom + g * 1.2;
   });
   const headless = [];
   for (const v of cands) {
     // 기둥 끝이 숫자에 거의 닿아야 그 숫자의 기둥 (옆 보표 기둥 배제)
-    const col = frets.filter(f => Math.abs(f.x - v.x) < 4.2 &&
+    let col = frets.filter(f => Math.abs(f.x - v.x) < 4.2 &&
       Math.min(Math.abs(v.y0 - lines[f.string - 1]), Math.abs(v.y1 - lines[f.string - 1])) < g * 1.1);
+    // 동그라미 화음은 기둥이 동그라미 가장자리에 붙어 끝난다
+    if (!col.length) {
+      const c = circles.find(c => v.x >= c.bbox[0] - 0.6 && v.x <= c.bbox[2] + 0.6 &&
+        ((v.y0 < c.bbox[1] && v.y1 > c.bbox[1] - 1 && v.y1 < c.bbox[3]) || (v.y1 > c.bbox[3] && v.y0 < c.bbox[3] + 1 && v.y0 > c.bbox[1])));
+      if (c) col = frets.filter(f => f.x > c.bbox[0] && f.x < c.bbox[2] && lines[f.string - 1] > c.bbox[1] && lines[f.string - 1] < c.bbox[3]);
+    }
+    // 맨 위 줄 숫자에서 TAB 아래 빔까지 내려가는 긴 기둥은 숫자에 붙은 것만 (나머지는 마디줄 등)
+    if (v.y1 - v.y0 >= staff.bottom - staff.top - 1 && !col.length) continue;
     if (col.length) {
       const cy = col.reduce((a, f) => a + lines[f.string - 1], 0) / col.length;
       const up = Math.abs(v.y0 - cy) > Math.abs(v.y1 - cy);
@@ -259,21 +275,25 @@ export function parseTabStaff(page, staff, glyphs, verts, beams, bars) {
   // 숫자 없는 기둥: 같은 보표의 숫자 있는 기둥들과 끝(빔 쪽) 높이가 같거나, TAB 줄에 딱 붙어 끝나는 것
   const topTips = stems.filter(v => v.side === "above").map(v => v.y0);
   const botTips = stems.filter(v => v.side === "below").map(v => v.y1);
+  // 빗금 머리(리듬 빗금)는 TAB 안에 그려지고 기둥이 그 끝에 닿는다
+  const slashHeads = mine.filter(q => q.cls === "repeat2" || (q.cls === "slash" && q.bbox[3] - q.bbox[1] > q.bbox[2] - q.bbox[0]));
   for (const v of headless) {
+    const onSlash = slashHeads.some(q => v.x > q.bbox[0] && v.x < q.bbox[2] && Math.abs(v.y1 - q.bbox[1]) < 1.5);
     const upOk = v.y0 < staff.top + 1.5 && v.y1 >= staff.top - 1.5 &&
-      (topTips.some(t => Math.abs(t - v.y0) < 0.8) || beamCount(v, beams, v.y0) > 0 ||
+      (topTips.some(t => Math.abs(t - v.y0) < 0.8) || beamCount(v, beams, v.y0) > 0 || onSlash ||
        (v.y0 < staff.top - 0.3 && v.y1 <= staff.top + 1.0));
+    const underSlash = slashHeads.some(q => v.x > q.bbox[0] && v.x < q.bbox[2] && Math.abs(v.y0 - q.bbox[3]) < 1.5);
     const downOk = v.y1 > staff.bottom - 1.5 && v.y0 <= staff.bottom + 1.5 &&
-      (botTips.some(t => Math.abs(t - v.y1) < 0.8) || beamCount(v, beams, v.y1) > 0 ||
+      (botTips.some(t => Math.abs(t - v.y1) < 0.8) || beamCount(v, beams, v.y1) > 0 || underSlash ||
        (v.y1 > staff.bottom + 0.3 && v.y0 >= staff.bottom - 1.0));
     if (upOk) stems.push({ ...v, side: "above" });
     else if (downOk) stems.push({ ...v, side: "below" });
   }
-  const flags = mine.filter(q => q.cls === "flag");
+  const flags = mine.filter(q => q.cls === "flag" || q.cls === "flag16");
   const dots = glyphs.filter(q => q.cls === "dot" && q.x > staff.x0 && q.x < staff.x1 &&
     q.y > staff.top - g * 2.2 && q.y < staff.bottom + g * 2.2);
-  const tuplets = glyphs.filter(q => q.cls === "tuplet3" && q.x > staff.x0 && q.x < staff.x1 &&
-    ((q.y < staff.top && q.y > staff.top - g * 4) || (q.y > staff.bottom && q.y < staff.bottom + g * 4)));
+  const tuplets = glyphs.filter(q => (q.cls === "tuplet3" || q.cls === "tuplet6") && q.x > staff.x0 && q.x < staff.x1 &&
+    ((q.bbox[1] < staff.top && q.y > staff.top - g * 4) || (q.bbox[3] > staff.bottom && q.y < staff.bottom + g * 4))); // 맨 줄에 걸쳐 찍히기도 한다
   const events = [];
   const usedFrets = new Set();
   // 각 숫자는 가장 가까운 기둥 하나에만 붙인다 (엇갈려 찍힌 화음 숫자가 옆 기둥에 붙지 않도록)
@@ -283,10 +303,24 @@ export function parseTabStaff(page, staff, glyphs, verts, beams, bars) {
     for (const s of stems) { const d = Math.abs(f.x - s.x); if (d < bd) { bd = d; best = s; } }
     if (best) owner.set(f, best);
   }
+  // 동그라미(긴 음) 안의 화음 숫자는 지그재그로 찍히므로, 하나가 기둥에 붙으면 같은 동그라미 안 숫자도 함께
+  const inCircle = (f, c) => f.x >= c.bbox[0] - 0.5 && f.x <= c.bbox[2] + 0.5 &&
+    lines[f.string - 1] >= c.bbox[1] - 0.5 && lines[f.string - 1] <= c.bbox[3] + 0.5;
+  for (const c of circles) {
+    const inside = frets.filter(f => inCircle(f, c));
+    const s = inside.map(f => owner.get(f)).find(Boolean);
+    if (s) for (const f of inside) owner.set(f, s);
+  }
+  // 꾸밈음: 기둥을 가로지르는 납작한 사선(리듬 빗금은 세로로 길다)
+  const graceSlashes = mine.filter(q => q.cls === "slash" && q.bbox[2] - q.bbox[0] > (q.bbox[3] - q.bbox[1]) * 1.5);
   for (const s of stems) {
     const tip = s.side === "above" ? s.y0 : s.y1;
+    if (graceSlashes.some(q => q.bbox[0] < s.x && q.bbox[2] > s.x && q.bbox[3] > s.y0 - 1 && q.bbox[1] < s.y1 + 1)) {
+      frets.filter(f => owner.get(f) === s).forEach(f => usedFrets.add(f));
+      continue;
+    }
     let n = beamCount(s, beams, tip);
-    n += flags.filter(f => Math.abs(f.bbox[0] - s.x) < 1.2 && f.bbox[1] < tip + 6 && f.bbox[3] > tip - 6).length;
+    n += flags.filter(f => Math.abs(f.bbox[0] - s.x) < 1.2 && f.bbox[1] < tip + 6 && f.bbox[3] > tip - 6).reduce((k, f) => k + (f.cls === "flag16" ? 2 : 1), 0);
     let col = frets.filter(f => owner.get(f) === s);
     col.forEach(f => usedFrets.add(f));
     // 같은 줄에 숫자가 둘이면 앞(왼쪽)의 것은 꾸밈음 → 뺀다
@@ -312,14 +346,32 @@ export function parseTabStaff(page, staff, glyphs, verts, beams, bars) {
   events.push(...rectRests(page, staff, verts).filter(r => !r.voice)); // 오선 바깥 쉼표는 일반 보표에만
   // 점: 사건 오른쪽 가까이
   events.sort((a, b) => a.x - b.x);
-  for (const d of dots) {
-    const dx = (d.bbox[0] + d.bbox[2]) / 2;
+  // 속 빈 빗금 머리(2분음표 리듬 빗금): 기둥이 "//"를 꿰뚫지 않고 그 끝에 붙어 있다. 기둥을 꿰뚫으면 트레몰로
+  const hollowSlash = new Set();
+  for (const q of mine.filter(q => q.cls === "repeat2")) {
+    const cy = (q.bbox[1] + q.bbox[3]) / 2;
+    const ev = events.find(e => e.stem && !e.notes.length && e.stem.x > q.bbox[0] && e.stem.x < q.bbox[2] && !(e.stem.y0 < cy - 1 && e.stem.y1 > cy + 1) &&
+      Math.abs(e.stem.y1 - q.bbox[1]) < 1.5); // 아래로 기둥이 달린 "//"는 박 반복 기호
+    if (ev) { if (ev.dur === 4) ev.dur = 2; ev.x1 = Math.max(ev.x1 ?? ev.x, q.bbox[2] + 1); hollowSlash.add(q); } // 기울어진 빗금이라 점은 조금 더 떨어져 찍힌다
+  }
+  // 겹점의 두 번째 열은 첫 열 바로 오른쪽에 같은 높이로 찍힌다
+  const dotOwner = new Map();
+  for (const d of [...dots].sort((a, b) => a.bbox[0] - b.bbox[0])) {
+    const dx = (d.bbox[0] + d.bbox[2]) / 2, dy = (d.bbox[1] + d.bbox[3]) / 2;
     let best = null;
-    for (const e of events) if ((e.x1 ?? e.x) + 0.2 < dx && dx - (e.x1 ?? e.x) < 4.5) best = e;
-    if (best) best.dots = 1;
+    for (const e of events) if ((e.x1 ?? e.x) + 0.2 < dx && dx - (e.x1 ?? e.x) < 5) best = e;
+    const left = [...dotOwner].find(([o]) => Math.abs((o.bbox[1] + o.bbox[3]) / 2 - dy) < 0.6 && dx - (o.bbox[0] + o.bbox[2]) / 2 > 1 && dx - (o.bbox[0] + o.bbox[2]) / 2 < 3.5);
+    if (left) best = left[1];
+    if (best) { (best.dotXs ||= []).push(dx); dotOwner.set(d, best); }
+  }
+  // 점이 가로로 두 열이면 겹점
+  for (const e of events) if (e.dotXs) {
+    const xs = e.dotXs.sort((a, b) => a - b);
+    e.dots = xs.some((x, i) => i && x - xs[i - 1] > 0.8) ? 2 : 1;
+    delete e.dotXs;
   }
   // 셋잇단: '3' 아래(위)의 빔으로 묶인 기둥들
-  for (const t of tuplets) markTuplet(events, t);
+  for (const t of tuplets) markTuplet(events, t, glyphs);
   // 마디별로 나누고, 숫자 없는 기둥은 앞 화음 반복
   const measures = [];
   const edges = measureEdges(staff, bars);
@@ -336,15 +388,16 @@ export function parseTabStaff(page, staff, glyphs, verts, beams, bars) {
   }
   // 기둥에 겹친 "//" = 트레몰로(그 음 길이 동안 16분음표로 연타). 그 밖의 "//"는 박 반복 기호
   const signs = [];
-  for (const q of mine.filter(q => q.cls === "repeat1" || q.cls === "repeat2")) {
+  for (const q of mine.filter(q => (q.cls === "repeat1" || q.cls === "repeat2") && !hollowSlash.has(q))) {
     const cx = (q.bbox[0] + q.bbox[2]) / 2;
     const ev = q.cls === "repeat2" && events.find(e => e.stem && Math.abs(e.stem.x - cx) < 2.5);
     if (ev) ev.tremolo = 16; else signs.push(q);
   }
   applyRepeatSigns(measures, edges, signs);
   const bigParens = mine.filter(q => q.cls === "paren" && q.bbox[3] - q.bbox[1] > g * 2);
-  measures.forEach(m => fixOverfull(m, bigParens));
-  measures.forEach((m, i) => fillAmbiguous(m, edges[i + 1]));
+  // 마디 길이는 박자표대로 (2/4 마디 등)
+  measures.forEach((m, i) => fixOverfull(m, bigParens, fulls[i] ?? 1));
+  measures.forEach((m, i) => fillAmbiguous(m, edges[i + 1], fulls[i] ?? 1));
   return measures;
 }
 
@@ -473,19 +526,34 @@ export function rectRests(page, staff, verts) {
  * 셋잇단 "3": 숫자 가운데에 가장 가까운, 길이가 같은 연속 3개 음에 표시한다
  * (8분 셋잇단은 좁고 4분 셋잇단은 넓게 퍼져 있으므로 거리 대신 순서로 고른다)
  */
-function markTuplet(events, t) {
+function markTuplet(events, t, glyphs = []) {
   const cx = (t.bbox[0] + t.bbox[2]) / 2;
+  const n = t.cls === "tuplet6" ? 6 : 3; // 6잇단(16분 6개 = 8분 셋잇단 길이)도 길이 비율은 2/3
+  // 숫자 양옆에 괄호선(브래킷)이 있으면 그 범위 안의 음 전부 (4분+8분처럼 길이가 섞인 셋잇단)
+  const br = glyphs.find(q => !q.cls && q.bbox[0] < cx - 3 && q.bbox[2] > cx + 3 && q.bbox[2] - q.bbox[0] > 8 &&
+    q.bbox[3] - q.bbox[1] < 6 && q.bbox[1] < t.bbox[3] + 1 && q.bbox[3] > t.bbox[1] - 1);
+  if (br) {
+    const all = events.filter(e => !e.tuplet && e.x > br.bbox[0] - 1.5 && e.x < br.bbox[2] + 1.5);
+    // 2성부(드럼 등)는 성부마다 따로 묶여 있으므로 길이가 맞는 성부 하나만
+    const ok = g => g.length >= 2 && [1 / 8, 1 / 4, 1 / 2].some(v => Math.abs(measureLength(g) * 2 / 3 - v) < 1e-6);
+    const by = (br.bbox[1] + br.bbox[3]) / 2;
+    const yOf = e => e.notes.length ? e.notes.reduce((a, n) => a + (n.cy ?? by), 0) / e.notes.length : e.cy ?? by;
+    const dist = v => { const es = all.filter(e => (e.voice || 1) === v); return es.length ? Math.abs(es.reduce((a, e) => a + yOf(e), 0) / es.length - by) : 1e9; };
+    const voices = [1, 2].sort((a, b) => dist(a) - dist(b)); // 브래킷에 가까운 성부부터
+    const grp = [all, ...voices.map(v => all.filter(e => (e.voice || 1) === v))].find(ok);
+    if (grp) { grp.forEach(e => (e.tuplet = n)); return; }
+  }
   const evs = events.filter(e => !e.tuplet).sort((a, b) => a.x - b.x);
   let best = null, bd = Infinity;
-  for (let i = 0; i + 2 < evs.length; i++) {
-    const grp = evs.slice(i, i + 3);
+  for (let i = 0; i + n - 1 < evs.length; i++) {
+    const grp = evs.slice(i, i + n), last = grp[n - 1];
     if (!grp.every(e => e.dur === grp[0].dur)) continue;
-    const mid = (grp[0].x + (grp[2].x1 ?? grp[2].x)) / 2;
-    const span = (grp[2].x1 ?? grp[2].x) - grp[0].x;
+    const mid = (grp[0].x + (last.x1 ?? last.x)) / 2;
+    const span = (last.x1 ?? last.x) - grp[0].x;
     const d = Math.abs(mid - cx);
     if (d < bd && d < Math.max(8, span * 0.6)) { bd = d; best = grp; }
   }
-  if (best) best.forEach(e => (e.tuplet = 3));
+  if (best) best.forEach(e => (e.tuplet = n));
 }
 
 /** 사건 길이 합 (온음표 = 1) */
@@ -494,7 +562,7 @@ export function measureLength(events) {
   for (const e of events) {
     let v = 1 / e.dur;
     if (e.dots) v *= e.dots === 2 ? 1.75 : 1.5;
-    if (e.tuplet === 3) v *= 2 / 3;
+    if (e.tuplet) v *= 2 / 3;
     sum += v;
   }
   return sum;
@@ -556,7 +624,7 @@ export function parseStdStaff(page, staff, glyphs, verts, beams, bars, opts = {}
   const key = opts.key ?? keyOf(staff, glyphs, firstX);
   const stems = verts.filter(v => v.w < 0.8 && v.y1 - v.y0 > g * 1.5 && v.x > staff.x0 && v.x < staff.x1 &&
     !barXs.some(x => Math.abs(x - v.x) < 0.8) && v.y1 > staff.top - g * 6 && v.y0 < staff.bottom + g * 6);
-  const flags = near.filter(q => q.cls === "flag");
+  const flags = near.filter(q => q.cls === "flag" || q.cls === "flag16");
   // 머리 → 기둥 연결: 머리 오른쪽 끝(위로 뻗은 기둥) 또는 왼쪽 끝(아래로 뻗은 기둥)에 닿고 세로로 겹침
   const stemOf = new Map();
   for (const h of heads) {
@@ -584,7 +652,7 @@ export function parseStdStaff(page, staff, glyphs, verts, beams, bars, opts = {}
     const up = Math.abs(s.y0 - cyAvg) > Math.abs(s.y1 - cyAvg);
     const tip = up ? s.y0 : s.y1;
     let n = beamCount(s, beams, tip);
-    n += flags.filter(f => Math.abs(f.bbox[0] - s.x) < 1.2 && f.bbox[1] < tip + 7 && f.bbox[3] > tip - 7).length;
+    n += flags.filter(f => Math.abs(f.bbox[0] - s.x) < 1.2 && f.bbox[1] < tip + 7 && f.bbox[3] > tip - 7).reduce((k, f) => k + (f.cls === "flag16" ? 2 : 1), 0);
     const hollow = hs.some(h => h.cls === "head_half" || h.cls === "head_xo");
     const dur = n > 0 ? 4 * 2 ** n : hollow ? 2 : 4;
     events.push({ x: Math.min(...hs.map(h => h.bbox[0])), x1: Math.max(...hs.map(h => h.bbox[2])), dur, dots: 0,
@@ -632,7 +700,10 @@ export function parseStdStaff(page, staff, glyphs, verts, beams, bars, opts = {}
     delete e.dotXs;
   }
   // 셋잇단
-  for (const t of near.filter(q => q.cls === "tuplet3")) markTuplet(events, t);
+  // 드럼 아래 성부의 셋잇단 숫자는 오선에서 조금 더 멀리 찍힌다 (건반은 보표 간격이 좁아 이웃 보표 것을 잡으므로 드럼만)
+  const tupReach = opts.drums ? 9 : 5;
+  for (const t of glyphs.filter(q => (q.cls === "tuplet3" || q.cls === "tuplet6") && q.x > staff.x0 - 2 && q.x < staff.x1 + 2 &&
+    (q.bbox[1] + q.bbox[3]) / 2 > staff.top - g * tupReach && (q.bbox[1] + q.bbox[3]) / 2 < staff.bottom + g * tupReach)) markTuplet(events, t, glyphs);
   // 임시표(마디 안에서 같은 음에 계속 적용) + 조표
   const accs = near.filter(q => q.cls === "sharp" || q.cls === "flat" || q.cls === "natural");
   const keyAlter = {};
@@ -686,8 +757,9 @@ export function parseStdStaff(page, staff, glyphs, verts, beams, bars, opts = {}
   applyRepeatSigns(measures, edges, signs);
   const bigParens = near.filter(q => q.cls === "paren" && q.bbox[3] - q.bbox[1] > g * 2);
   // 2성부로 나눌 수 있는 마디는 길이가 넘치는 게 정상이므로 건드리지 않는다
-  measures.forEach(m => { if (!opts.drums && !m.some(e => e.voice === 2) && !splitVoices(m, 1)) fixOverfull(m, bigParens); });
-  measures.forEach((m, i) => fillAmbiguous(m, edges[i + 1]));
+  const fullOf = i => opts.fulls?.[i] ?? 1;
+  measures.forEach((m, i) => { if (!opts.drums && !m.some(e => e.voice === 2) && !splitVoices(m, fullOf(i))) fixOverfull(m, bigParens, fullOf(i)); });
+  measures.forEach((m, i) => fillAmbiguous(m, edges[i + 1], fullOf(i)));
   measures.clef = clef; measures.key = key;
   return measures;
 }
@@ -921,17 +993,18 @@ function parseSystems(list) {
         tsList.push(ts.slice());
         courtesy = timeSigAt(sys.staves[0], pg.glyphs, edges[i + 1] - 9, edges[i + 1]);
       }
+      const fulls = tsList.map(t => t[0] / t[1]);
       // 도돌이표 점을 먼저 골라내야 점음표의 점으로 잘못 붙지 않는다
       const rdots = markRepeatDots(sys, pg.glyphs, verts);
       const nav = navigationMarks(sys, pg.glyphs, edges, rdots);
       const parsed = layout.map(p => {
-        if (p.kind === "guitar" || p.kind === "bass") return parseTabStaff(pg, sys.staves[p.tab], pg.glyphs, verts, beams, sb);
+        if (p.kind === "guitar" || p.kind === "bass") return parseTabStaff(pg, sys.staves[p.tab], pg.glyphs, verts, beams, sb, fulls);
         if (p.kind === "piano") {
-          const up = parseStdStaff(pg, sys.staves[p.std], pg.glyphs, verts, beams, sb, { others: sys.staves });
-          const lo = parseStdStaff(pg, sys.staves[p.lower], pg.glyphs, verts, beams, sb, { others: sys.staves });
+          const up = parseStdStaff(pg, sys.staves[p.std], pg.glyphs, verts, beams, sb, { others: sys.staves, fulls });
+          const lo = parseStdStaff(pg, sys.staves[p.lower], pg.glyphs, verts, beams, sb, { others: sys.staves, fulls });
           return up.map((m, i) => { const r = [...m.map(e => ({ ...e, staff: 0 })), ...(lo[i] || []).map(e => ({ ...e, staff: 1 }))]; r.repeatOf2 = m.repeatOf2; return r; });
         }
-        return parseStdStaff(pg, sys.staves[p.std], pg.glyphs, verts, beams, sb, { drums: p.kind === "drums", others: sys.staves });
+        return parseStdStaff(pg, sys.staves[p.std], pg.glyphs, verts, beams, sb, { drums: p.kind === "drums", others: sys.staves, fulls });
       });
       // 이 단의 파트 → 전체 파트: 종류와 그 종류 안의 순번으로 맞춘다 (단마다 보표 수가 달라도 섞이지 않게)
       const ord = {};
@@ -1050,7 +1123,7 @@ function restsFor(len) {
   }
   return out;
 }
-function evLen(e) { return (1 / e.dur) * (e.dots === 2 ? 1.75 : e.dots ? 1.5 : 1) * (e.tuplet === 3 ? 2 / 3 : 1); }
+function evLen(e) { return (1 / e.dur) * (e.dots === 2 ? 1.75 : e.dots ? 1.5 : 1) * (e.tuplet ? 2 / 3 : 1); }
 
 /** 마디 길이를 박자에 맞춘다: 모자라면 쉼표로 채우고, 넘치면 넘치는 사건을 버린다 */
 function fitMeasure(evs, full) {
@@ -1086,7 +1159,7 @@ function beatTex(e, kind, strings = 6, perc = false) {
   }
   const fx = [];
   if (e.dots) fx.push(e.dots === 2 ? "dd" : "d");
-  if (e.tuplet === 3) fx.push("tu 3");
+  if (e.tuplet) fx.push(`tu ${e.tuplet}`);
   if (e.tremolo && !e.rest) fx.push("tp 16");
   // 음표 효과({t})와 박 효과가 함께 있을 때 헷갈리지 않도록 화음 괄호로 감싼다
   if (fx.length && body !== "r" && !body.startsWith("(")) body = `(${body})`;

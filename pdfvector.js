@@ -69,6 +69,20 @@ function isAxisRect(segs) {
  * @param pdfjs  pdf.js 모듈 (OPS 사용)
  * @param page   PDFPageProxy
  */
+/** 하위 경로가 모두 곡선 도형(타원) 또는 축 정렬 사각형이고, 둘 다 있는 묶음 */
+function isOvalsAndRects(segs) {
+  const subs = [];
+  for (const g of segs) { if (g.op === 0) subs.push([]); if (subs.length) subs[subs.length - 1].push(g); }
+  if (subs.length < 2) return false;
+  let oval = 0, rect = 0;
+  for (const sp of subs) {
+    if (isAxisRect(sp)) rect++;
+    else if (sp.some(g => g.op === 2)) oval++;
+    else return false;
+  }
+  return oval > 0 && rect > 0;
+}
+
 export async function extractPage(pdfjs, page) {
   const OPS = pdfjs.OPS;
   const vp = page.getViewport({ scale: 1 });
@@ -97,14 +111,8 @@ export async function extractPage(pdfjs, page) {
       const tx = (x, y) => [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]];
       const [ax0, ay0] = tx(mm[0], mm[1]), [ax1, ay1] = tx(mm[2], mm[3]);
       const bbox = [Math.min(ax0, ax1), Math.min(ay0, ay1), Math.max(ax0, ax1), Math.max(ay0, ay1)];
-      if (ax && !translated) {
-        rects.push({ x0: bbox[0], y0: bbox[1], x1: bbox[2], y1: bbox[3], fill });
-      } else if (translated) {
-        const [x, y] = tx(0, 0);
-        const scale = Math.hypot(ctm[0], ctm[1]);
-        glyphs.push({ sig: signature(segs) + (Math.abs(scale - 1) > 0.01 ? "@" + scale.toFixed(2) : ""), x, y, bbox, fill, segs, ctm: ctm.slice() });
-      } else {
-        // 여러 사각형을 한 번에 그린 경우(오선 묶음 등)를 하위 경로별로 나눈다
+      // 여러 사각형·도형을 한 번에 그린 경우(오선 묶음 등)를 하위 경로별로 나눈다
+      const split = () => {
         let cur = [];
         const flush = () => {
           if (!cur.length) return;
@@ -119,7 +127,16 @@ export async function extractPage(pdfjs, page) {
         };
         for (const g of segs) { if (g.op === 0) flush(); cur.push(g); }
         flush();
-      }
+      };
+      if (ax && !translated) {
+        rects.push({ x0: bbox[0], y0: bbox[1], x1: bbox[2], y1: bbox[3], fill });
+      } else if (translated) {
+        const [x, y] = tx(0, 0);
+        const scale = Math.hypot(ctm[0], ctm[1]);
+        glyphs.push({ sig: signature(segs) + (Math.abs(scale - 1) > 0.01 ? "@" + scale.toFixed(2) : ""), x, y, bbox, fill, segs, ctm: ctm.slice() });
+        // 한 단에 걸친 여러 도형(TAB 동그라미 타원+기둥 묶음 등)은 기호가 아니므로 낱개 도형으로도 넣는다
+        if (bbox[2] - bbox[0] > 40 && isOvalsAndRects(segs)) split();
+      } else split();
     }
   }
   return { width: vp.width, height: H, glyphs, rects, polys };
