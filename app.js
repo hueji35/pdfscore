@@ -39,7 +39,7 @@
 
   const $ = id => document.getElementById(id);
   const ui = {
-    file: $("fileInput"), demo: $("demoBtn"), demo2: $("demoBtn2"),
+    file: $("fileInput"),
     play: $("playBtn"), stop: $("stopBtn"), rewind: $("rewindBtn"),
     tempo: $("tempo"), tempoOut: $("tempoOut"), zoomIn: $("zoomIn"), zoomOut: $("zoomOut"), zoomVal: $("zoomVal"),
     autoScroll: $("autoScroll"), partsBtn: $("partsBtn"), partList: $("partList"),
@@ -172,6 +172,59 @@
     return pages > 1 && !mobile ? 2 : 1;
   }
 
+  // 엔진 미리 준비: 모델 내려받기·GPU 초기화를 파일을 고르는 동안 끝내 둔다.
+  // 작은 악보 한 줄을 실제로 인식시켜서 모든 모델과 GPU 셰이더를 한 번에 준비한다.
+  let warmup = null, warmMsg = null;
+  function warmUpEngine() {
+    if (warmup || location.protocol === "file:") return warmup;
+    warmup = (async () => {
+      const [engine] = await getEngines(1);
+      const png = await renderWarmupImage();
+      const t = performance.now();
+      await engine.recognizePage(png, {
+        ocr: false,
+        onProgress: ({ stage, done, total }) => {
+          const mb = x => (x / 1048576).toFixed(0);
+          warmMsg = stage === "models" && done < total
+            ? `악보 인식 모델 내려받는 중… ${mb(done)} / ${mb(total)} MB\n(처음 한 번만 받고, 다음부터는 저장된 것을 씁니다)`
+            : "악보 인식 엔진 준비 중…";
+        },
+      });
+      console.info(`OMR warm-up (${engine.backend}) ${((performance.now() - t) / 1000).toFixed(1)}s`);
+    })().catch(err => console.warn("OMR warm-up failed", err)).finally(() => { warmMsg = null; });
+    return warmup;
+  }
+  async function renderWarmupImage() {
+    const box = document.createElement("div");
+    box.style.cssText = "position:fixed;left:-10000px;top:0;width:900px;background:#fff";
+    document.body.appendChild(box);
+    try {
+      const notes = ["C5", "E5", "G5", "E5", "D5", "F5", "A5", "F5"].map(p =>
+        `<note><pitch><step>${p[0]}</step><octave>${p[1]}</octave></pitch><duration>1</duration><type>quarter</type></note>`);
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1"><part-list><score-part id="P1"><part-name></part-name></score-part></part-list>
+<part id="P1"><measure number="1"><attributes><divisions>1</divisions><key><fifths>0</fifths></key>
+<time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>${notes.slice(0, 4).join("")}</measure>
+<measure number="2">${notes.slice(4).join("")}</measure></part></score-partwise>`;
+      const o = new opensheetmusicdisplay.OpenSheetMusicDisplay(box, { autoResize: false, drawTitle: false, drawPartNames: false });
+      await o.load(xml);
+      o.render();
+      const svg = box.querySelector("svg");
+      const w = svg.width.baseVal.value, h = svg.height.baseVal.value;
+      const img = new Image();
+      img.src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(new XMLSerializer().serializeToString(svg));
+      await img.decode();
+      const c = document.createElement("canvas");
+      c.width = 1600; c.height = Math.round((h * 1600) / w);
+      const g = c.getContext("2d");
+      g.fillStyle = "#fff"; g.fillRect(0, 0, c.width, c.height);
+      g.drawImage(img, 0, 0, c.width, c.height);
+      return await new Promise(r => c.toBlob(r, "image/png"));
+    } finally {
+      box.remove();
+    }
+  }
+
   const STAGE_KO = { segment: "악보 구조 분석", detect: "오선 찾기", dewarp: "기울기 보정", staff: "오선별 음표 읽기",
     ocr: "글자 읽기", xml: "MusicXML 만들기", tab: "타브 확인", models: "모델 준비" };
 
@@ -247,6 +300,14 @@
       : [file];
     if (signal.aborted) return hideOverlay();
 
+    if (warmup) {
+      const show = () => showOverlay(warmMsg || "악보 인식 엔진 준비 중…", true);
+      show();
+      const iv = setInterval(show, 500);
+      await warmup;
+      clearInterval(iv);
+      if (signal.aborted) return hideOverlay();
+    }
     let pool;
     try {
       pool = await getEngines(engineCount(pages.length));
@@ -292,7 +353,10 @@
       if (k < pages.length) { hideOverlay(); report(); }
     };
 
-    const worker = async engine => {
+    let firstDone;
+    const firstPage = new Promise(r => (firstDone = r));
+    const worker = async (engine, idx = 0) => {
+      if (idx > 0) await firstPage;
       while (!fatal && !signal.aborted && nextPage < pages.length) {
         const i = nextPage++;
         if (results[i] !== undefined) continue;
@@ -315,12 +379,14 @@
           return;
         } else { results[i] = null; console.warn("OMR page failed", i + 1, res.error, res.log); }
         stage[i] = "완료";
+        if (i === 0) firstDone();
         await showReady(false);
       }
+      firstDone();
     };
 
     try {
-      await Promise.all(pool.map(worker));
+      await Promise.all(pool.map((e, idx) => worker(e, idx)));
       if (fatal === "stalled" && !signal.aborted) {
         // 빠른 엔진이 멈춤 → 호환 모드로 남은 페이지를 이어서 읽는다
         console.warn("OMR stalled on", backend, "→ wasm");
@@ -1063,11 +1129,11 @@
     a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 1000);
   };
+  const isTouch = matchMedia("(pointer: coarse)").matches;
+  if (!isTouch && /^https?:$/.test(location.protocol)) setTimeout(warmUpEngine, 3000);
+  ui.file.parentElement.addEventListener("click", () => warmUpEngine());
+  window.addEventListener("dragenter", () => warmUpEngine());
   ui.file.onchange = () => { openFile(ui.file.files[0]); ui.file.value = ""; };
-  const openDemo = () => { stop(); loadScore(window.makeDemoMusicXML(), "demo.musicxml").catch(err => {
-    hideOverlay(); alertBox("데모를 열 수 없습니다", escapeHtml(err.message)); }); };
-  ui.demo.onclick = openDemo;
-  ui.demo2.onclick = openDemo;
   ui.play.onclick = () => (state.playing ? pause() : play());
   ui.stop.onclick = stop;
   ui.rewind.onclick = () => seekTo(0);

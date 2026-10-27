@@ -16,7 +16,6 @@
       <input id="fileInput" type="file" hidden
         accept=".musicxml,.xml,.mxl,.pdf,.png,.jpg,.jpeg,.tif,.tiff,.bmp,application/pdf,image/*">
     </label>
-    <button id="demoBtn" class="btn" title="데모 악보 열기">🎵 <span class="lbl">데모</span></button>
     <button id="saveBtn" class="btn" title="인식된 악보를 MusicXML로 저장" hidden>💾 <span class="lbl">저장</span></button>
   </div>
   <div class="group transport">
@@ -70,7 +69,6 @@
         <li><b>MusicXML / MXL</b> — 바로 열립니다 (MuseScore, Finale, Sibelius, Dorico 등에서 내보내기).</li>
         <li><b>PDF / 이미지(PNG·JPG)</b> — 이 기기 안에서 악보를 인식(OMR)해 변환합니다. 처음 한 번 인식 모델(약 130~190MB)을 내려받습니다.</li>
       </ul>
-      <p>처음이라면 <button class="btn" id="demoBtn2">🎵 데모 악보</button>로 사용법을 확인해 보세요.</p>
     </div>
     <div id="score"></div>
   </div>
@@ -97,7 +95,6 @@
 
 <script src="lib/opensheetmusicdisplay.min.js"></script>
 <script src="lib/soundfont-player.min.js"></script>
-<script src="demo.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
