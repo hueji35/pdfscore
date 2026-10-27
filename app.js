@@ -126,6 +126,55 @@
     enterTabMode();
     tab.loadFile(new Uint8Array(await file.arrayBuffer()));
   }
+  /**
+   * 악보 프로그램이 만든(벡터) 밴드 스코어 PDF를 그림 인식 없이 데이터로 읽어 밴드 악보 모드로 연다.
+   * 해당하지 않는 PDF면 false를 돌려주고, 호출한 쪽이 그림 인식(OMR)으로 넘어간다.
+   */
+  async function openVectorPdf(file) {
+    if (location.protocol === "file:") return false; // ES 모듈은 웹 주소로 열었을 때만
+    showOverlay("PDF 악보 데이터 읽는 중…");
+    const [pdfjs, { extractPage }, B, { SHAPES }] = await Promise.all([
+      import("./lib/pdfjs/pdf.min.mjs"), import("./pdfvector.js"), import("./bandscore.js"), import("./bandshapes.js")]);
+    pdfjs.GlobalWorkerOptions.workerSrc = new URL("lib/pdfjs/pdf.worker.min.mjs", location.href).href;
+    const classify = B.makeClassifier(SHAPES);
+    const doc = await pdfjs.getDocument({ data: new Uint8Array(await file.arrayBuffer()) }).promise;
+    const pages = [];
+    try {
+      for (let i = 1; i <= doc.numPages; i++) {
+        showOverlay(`PDF 악보 데이터 읽는 중… ${i}/${doc.numPages}쪽`);
+        const pg = await extractPage(pdfjs, await doc.getPage(i));
+        for (const g of pg.glyphs) g.cls = classify(g.segs);
+        pages.push(pg);
+        if (i === Math.min(3, doc.numPages) && !B.looksLikeBandScore(pages)) return false; // 앞 몇 쪽으로 판단
+      }
+    } finally {
+      doc.destroy();
+    }
+    if (!B.looksLikeBandScore(pages)) return false;
+    showOverlay("밴드 악보로 정리하는 중…");
+    const score = B.parseBandScore(pages);
+    if (!score.parts.length || !score.bars.length) return false;
+    const title = file.name.replace(/\.pdf$/i, "");
+    const tempo = B.detectTempo(pages);
+    const tex = B.toAlphaTex(score, title, tempo || 120);
+    await loadAlphaTab();
+    const imp = new alphaTab.importer.AlphaTexImporter();
+    imp.initFromString(tex, new alphaTab.Settings());
+    let atScore;
+    try {
+      atScore = imp.readScore();
+    } catch (err) {
+      console.error("alphaTex", err.message, [...(imp.semanticDiagnostics?.items || [])].slice(0, 5).map(x => x.message));
+      window.pdfscore.lastTex = tex;
+      throw new Error("PDF에서 읽은 악보를 정리하지 못했습니다.");
+    }
+    enterTabMode();
+    tab.loadScore(atScore);
+    window.pdfscore.lastTex = tex;
+    toast(`PDF 데이터로 ${score.bars.length}마디를 읽었습니다${tempo ? "" : " (템포 표시가 없어 120으로 설정)"}.`, 5000);
+    return true;
+  }
+
   function enterTabMode() {
     pause();
     state.loaded = false;
@@ -145,6 +194,8 @@
     try {
       if (GP_EXT.test(file.name)) {
         await openTabFile(file);
+      } else if (/\.pdf$/i.test(file.name) && await openVectorPdf(file)) {
+        // 악보 프로그램이 만든 PDF: 그림 인식 없이 데이터로 읽었음
       } else if (OMR_EXT.test(file.name)) {
         await openViaOmr(file);
       } else if (/\.mxl$/i.test(file.name)) {
