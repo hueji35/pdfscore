@@ -24,12 +24,22 @@ export function findStaves(page) {
     .map(r => ({ x0: r.x0, x1: r.x1, y: (r.y0 + r.y1) / 2, gaps: [] }))
     .sort((a, b) => a.y - b.y || a.x0 - b.x0);
   // 가운데가 비어 끊긴 보표 줄(코다 앞 빈칸 등)은 하나로 잇고 빈칸 위치를 기억한다
+  // (끊긴 양쪽의 높이가 1pt 가까이 어긋나기도 하므로, 높이가 비슷한 조각끼리 모아 왼쪽부터 잇는다)
   const lines = [];
-  for (const l of raw) {
-    const last = lines[lines.length - 1];
-    if (last && Math.abs(last.y - l.y) < 0.2 && l.x0 > last.x1 && l.x0 - last.x1 < 30) { last.gaps.push([last.x1, l.x0]); last.x1 = l.x1; }
-    else lines.push(l);
+  for (let i = 0; i < raw.length;) {
+    let j = i + 1;
+    while (j < raw.length && raw[j].y - raw[j - 1].y < 1.2) j++;
+    const grp = raw.slice(i, j).sort((a, b) => a.x0 - b.x0);
+    const merged = [];
+    for (const l of grp) {
+      const last = merged[merged.length - 1];
+      if (last && l.x0 > last.x1 - 1 && l.x0 - last.x1 < 30) { last.gaps.push([last.x1, l.x0]); last.x1 = l.x1; last.y = (last.y + l.y) / 2; }
+      else merged.push({ ...l, gaps: [] });
+    }
+    lines.push(...merged);
+    i = j;
   }
+  lines.sort((a, b) => a.y - b.y || a.x0 - b.x0);
   const used = new Set();
   const staves = [];
   for (let i = 0; i < lines.length; i++) {
@@ -766,6 +776,29 @@ function extendVoltas(bars) {
   }
 }
 
+/**
+ * 여러 마디 쉼표: 가운데 줄 위의 굵은 가로 막대 + 그 위의 숫자(쉬는 마디 수).
+ * @returns 마디마다 쉬는 마디 수 (여러 마디 쉼표가 아니면 1)
+ */
+function multiRestCounts(sys, page, glyphs, edges) {
+  const st = sys.staves[0];
+  const mid = st.lines[Math.floor(st.lines.length / 2)];
+  const out = [];
+  for (let i = 0; i < edges.length - 1; i++) {
+    const bar = page.rects.find(r => !isWhite(r.fill) && r.x1 - r.x0 > 12 && r.x0 > edges[i] && r.x1 < edges[i + 1] &&
+      Math.abs((r.y0 + r.y1) / 2 - mid) < 0.6 && r.y1 - r.y0 > st.gap * 0.35);
+    let n = 1;
+    if (bar) {
+      const num = glyphs.filter(q => q.cls && /^(n|v|d)\d$/.test(q.cls) && q.bbox[1] < st.top && q.bbox[3] < st.top + 2 && q.bbox[3] > st.top - 4 &&
+        q.bbox[0] > bar.x0 - 2 && q.bbox[2] < bar.x1 + 2).sort((a, b) => a.x - b.x);
+      const v = +num.map(q => q.cls.slice(1)).join("");
+      if (v > 1 && v < 200) n = v;
+    }
+    out.push(n);
+  }
+  return out;
+}
+
 /** 단의 보표 구성 문자열 (S5 = 5줄 오선, T6 = 6줄 TAB …) */
 function systemSig(sys) {
   const stdGap = Math.min(...sys.staves.map(s => s.gap));
@@ -777,6 +810,38 @@ function systemSig(sys) {
  * 가장 많이 나오는 보표 구성의 단들을 본편으로 보고, 구성이 다른 단(키보드 파트 부록 등)은
  * 따로 해석해서 마디 수가 본편과 같으면 함께 연주되는 추가 파트로 붙인다.
  */
+/**
+ * 부록 마디를 본편 마디에 맞춘다.
+ * 마디 수가 같으면 그대로, 다르면 연습 기호 상자([A] [B] …)를 기준점으로 구간마다 앞에서부터 맞추고
+ * 구간이 짧은 쪽은 남는 마디를 비워 둔다(-1).
+ * @returns 본편 마디 번호 → 부록 마디 번호(-1은 없음), 맞출 수 없으면 null
+ */
+export function alignSections(mainBars, extraBars) {
+  if (mainBars.length === extraBars.length) return mainBars.map((_, i) => i);
+  const lm = mainBars.map((b, i) => (b.rehearsal ? i : -1)).filter(i => i >= 0);
+  const la = extraBars.map((b, i) => (b.rehearsal ? i : -1)).filter(i => i >= 0);
+  if (!lm.length || lm.length !== la.length) return null;
+  const map = new Array(mainBars.length).fill(-1);
+  const ms = [0, ...lm, mainBars.length], as = [0, ...la, extraBars.length];
+  for (let k = 0; k + 1 < ms.length; k++) {
+    const n = Math.min(ms[k + 1] - ms[k], as[k + 1] - as[k]);
+    for (let j = 0; j < n; j++) map[ms[k] + j] = as[k] + j;
+  }
+  return map;
+}
+
+/** 개발용: 본편과 부록을 각각 해석한 결과 */
+export function parseBandScoreSections(pages) {
+  const all = [];
+  pages.forEach((pg, pi) => {
+    const verts = verticalRects(pg);
+    for (const sys of groupSystems(findStaves(pg), verts).filter(s => s.staves.length > 3)) all.push({ pg, pi, sys, sig: systemSig(sys) });
+  });
+  const out = {};
+  for (const sig of new Set(all.map(e => e.sig))) out[sig] = parseSystems(all.filter(e => e.sig === sig));
+  return out;
+}
+
 export function parseBandScore(pages) {
   const all = [];
   pages.forEach((pg, pi) => {
@@ -791,11 +856,17 @@ export function parseBandScore(pages) {
   const rest = all.filter(e => e.sig !== mainSig);
   if (rest.length) {
     const extra = parseSystems(rest);
-    if (extra.bars.length === main.bars.length) {
-      for (const p of extra.parts) { p.extra = true; main.parts.push(p); }
-      main.report.push(`부록 ${extra.parts.length}파트를 함께 붙였습니다.`);
+    const map = alignSections(main.bars, extra.bars);
+    if (map) {
+      for (const p of extra.parts) {
+        const ms = main.bars.map((_, i) => (map[i] >= 0 ? p.measures[map[i]] : null) || []);
+        main.parts.push({ ...p, measures: ms, extra: true });
+      }
+      const missing = map.filter(v => v < 0).length;
+      main.report.push(`16쪽부터의 부록 ${extra.parts.length}파트를 본편에 맞춰 붙였습니다` +
+        (missing ? ` (부록에 없는 ${missing}마디는 쉼표로 둠)` : "") + ".");
     } else {
-      main.report.push(`보표 구성이 다른 부분(${rest.length}단, ${extra.bars.length}마디)은 본편(${main.bars.length}마디)과 길이가 달라 뺐습니다.`);
+      main.report.push(`보표 구성이 다른 부분(${rest.length}단, ${extra.bars.length}마디)은 본편(${main.bars.length}마디)과 맞출 기준점이 없어 뺐습니다.`);
     }
   }
   return main;
@@ -846,9 +917,21 @@ function parseSystems(list) {
         if (!t) { t = { ...p, index: parts.length, measures: [] }; parts.push(t); while (t.measures.length < bars.length) t.measures.push([]); }
         return t;
       });
+      const restN = multiRestCounts(sys, pg, pg.glyphs, edges);
       for (let i = 0; i < nMeasures; i++) {
-        bars.push({ ts: tsList[i], page: pi, x: edges[i], nav: nav[i] || {} });
-        layout.forEach((p, k) => targets[k].measures.push(parsed[k][i] || []));
+        // 여러 마디 쉼표는 그 수만큼 빈 마디로 펼친다
+        for (let r = 0; r < restN[i]; r++) {
+          // 마디 앞의 조표 변경(샵/플랫 2개 이상) — 본편과 부록을 맞출 때 기준점으로 쓴다
+          const keyMark = r === 0 && i > 0 ? pg.glyphs.filter(q => (q.cls === "flat" || q.cls === "sharp" || q.cls === "natural") && q.x > edges[i] && q.x < edges[i] + 14 &&
+            q.y > sys.staves[0].top - 8 && q.y < sys.staves[0].bottom + 8).length : 0;
+          // 연습 기호 상자([A] [B] …): 본편과 부록을 맞추는 기준점
+          const rehearsal = r === 0 && pg.glyphs.some(q => q.cls === "rbox" && q.bbox[3] < sys.staves[0].top && q.bbox[3] > sys.staves[0].top - 32 &&
+            (q.bbox[0] + q.bbox[2]) / 2 > edges[i] - 4 && (q.bbox[0] + q.bbox[2]) / 2 < edges[i + 1] - 4);
+          bars.push({ ts: tsList[i], page: pi, x: edges[i], nav: r === 0 ? nav[i] || {} : {}, multiRest: restN[i] > 1, keyChange: keyMark >= 2, rehearsal });
+          layout.forEach((p, k) => targets[k].measures.push(r === 0 ? parsed[k][i] || [] : []));
+          parts.forEach(pp => { while (pp.measures.length < bars.length) pp.measures.push([]); });
+        }
+        continue;
         // 이 단에 없는 파트는 빈 마디
         parts.forEach(pp => { while (pp.measures.length < bars.length) pp.measures.push([]); });
       }
@@ -960,7 +1043,7 @@ function fitMeasure(evs, full) {
 
 const ACC = { 1: "#", "-1": "b", 0: "" };
 function noteTex(n) { return `${n.step}${ACC[n.alter || 0]}${n.oct}${n.tie ? "{t}" : ""}`; }
-function beatTex(e, kind, strings = 6) {
+function beatTex(e, kind, strings = 6, perc = false) {
   // 종류에 맞지 않는 음(다른 파트에서 섞여 들어온 것)은 뺀다
   const notes = e.notes.filter(n => kind === "tab" ? n.string >= 1 && n.string <= strings && Number.isFinite(n.fret)
     : kind === "drums" ? Number.isFinite(n.pos) : n.step && Number.isFinite(n.oct));
@@ -971,7 +1054,7 @@ function beatTex(e, kind, strings = 6) {
     const ns = [...new Set(e.notes.map(n => `${n.dead ? "x" : n.fret}.${n.string}${n.tie ? "{t}" : ""}`))];
     body = ns.length > 1 ? `(${ns.join(" ")})` : ns[0];
   } else if (kind === "drums") {
-    const ns = [...new Set(e.notes.map(n => drumArticulation(n.pos, n.xhead)))];
+    const ns = [...new Set(e.notes.map(n => perc ? (n.xhead ? "CabasaHit" : "TambourineHit") : drumArticulation(n.pos, n.xhead)))];
     body = ns.length > 1 ? `(${ns.join(" ")})` : ns[0];
   } else {
     const ns = [...new Set(e.notes.map(noteTex))]; // 같은 음이 겹쳐 적힌 경우(두 성부 유니즌) 하나로
@@ -1020,16 +1103,23 @@ export function toAlphaTex(score, title = "", tempo = 120) {
   let gtr = 0, std = 0;
   const hasCoda = bars.some(b => b.nav && b.nav.coda);
   let tex = `\\title "${title.replace(/"/g, "'")}"\n\\tempo ${tempo}\n.\n`;
+  // 부록(본편 뒤에 따로 실린 Piano·Keyboard·Percussion 등) 파트 이름과 소리
+  const extraNames = ["Piano", "Keyboard 1", "Keyboard 2", "Keyboard 3", "Keyboard 4"];
+  const extraPrograms = [0, 89, 81, 48, 88];
+  let ex = 0;
   for (const p of parts) {
     let name = names[p.kind];
+    let program = programs[p.kind];
     if (p.kind === "guitar") name = `Guitar ${++gtr}`;
-    if (p.kind === "std") name = ++std === 1 ? "Vocal" : `Part ${std}`;
+    if (p.kind === "std" && !p.extra) name = ++std === 1 ? "Vocal" : `Part ${std}`;
     if (p.label) name = labelName(p.label) || name;
+    if (p.extra && p.kind !== "drums") { program = extraPrograms[ex] ?? 0; name = extraNames[ex++] || `Keyboard ${ex}`; }
+    if (p.extra && p.kind === "drums") name = "Percussion";
     const kind = p.kind === "guitar" || p.kind === "bass" ? "tab" : p.kind === "drums" ? "drums" : "std";
     tex += `\\track "${name}"\n`;
     if (kind === "drums") tex += `\\instrument percussion\n\\articulation defaults\n\\staff {score}\n`;
     else if (kind === "tab") tex += `\\instrument ${programs[p.kind]}\n\\staff {score tabs}\n\\tuning ${TUNINGS[p.strings] || TUNINGS[6]}\n` + (p.kind === "bass" ? "\\clef F4\n" : "");
-    else tex += `\\instrument ${programs[p.kind] ?? 0}\n\\staff {score}\n` + (p.clef === "F" ? "\\clef F4\n" : "");
+    else tex += `\\instrument ${program ?? 0}\n\\staff {score}\n` + (p.clef === "F" ? "\\clef F4\n" : "");
     // 마디마다 성부 나누기를 미리 정해 둔다
     const voiced = p.measures.map((m, i) => {
       const full = bars[i].ts[0] / bars[i].ts[1];
@@ -1064,7 +1154,7 @@ export function toAlphaTex(score, title = "", tempo = 120) {
         const t = bars[i].ts.join(" ");
         if (t !== lastTs) { head = `\\ts ${t} `; lastTs = t; }
         if (p === parts[0] && v === 1) head = navTex(bars[i].nav, hasCoda) + head; // 연주 순서는 첫 트랙에만
-        tex += head + fitted.map(e => beatTex(e, kind, p.strings)).join(" ") + " |\n";
+        tex += head + fitted.map(e => beatTex(e, kind, p.strings, p.extra)).join(" ") + " |\n";
       });
     }
   }
