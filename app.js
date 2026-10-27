@@ -180,18 +180,18 @@
   function warmUpEngine() {
     if (warmup || location.protocol === "file:") return warmup;
     warmup = (async () => {
+      await checkModelsStored();
       const [engine] = await getEngines(1);
       const png = await renderWarmupImage();
       const t = performance.now();
       await engine.recognizePage(png, {
         ocr: false,
         onProgress: ({ stage, done, total }) => {
-          const mb = x => (x / 1048576).toFixed(0);
-          warmMsg = stage === "models" && done < total
-            ? `악보 인식 모델 내려받는 중… ${mb(done)} / ${mb(total)} MB\n(처음 한 번만 받고, 다음부터는 저장된 것을 씁니다)`
-            : "악보 인식 엔진 준비 중…";
+          warmMsg = stage === "models" && done < total ? modelMsg(done, total) : "악보 인식 엔진 준비 중…";
         },
       });
+      keepModels();
+      modelsStored = true;
       console.info(`OMR warm-up (${engine.backend}) ${((performance.now() - t) / 1000).toFixed(1)}s`);
     })().catch(err => console.warn("OMR warm-up failed", err)).finally(() => { warmMsg = null; });
     return warmup;
@@ -225,6 +225,26 @@
     } finally {
       box.remove();
     }
+  }
+
+  // 엔진은 저장소(Cache API)에서 모델을 읽을 때도 내려받을 때와 같은 진행 신호를 보낸다.
+  // 그래서 저장소에 모델이 이미 있는지 직접 확인해서 문구를 고른다.
+  let modelsStored = null;
+  async function checkModelsStored() {
+    try {
+      const keys = await (await caches.open("homr-web-models")).keys();
+      modelsStored = keys.length >= 3; // 분할·인코더·디코더 모델
+    } catch { modelsStored = false; }
+    return modelsStored;
+  }
+  function modelMsg(done, total) {
+    if (modelsStored) return "저장된 악보 인식 모델 불러오는 중…";
+    const mb = x => (x / 1048576).toFixed(0);
+    return `악보 인식 모델 내려받는 중… ${mb(done)} / ${mb(total)} MB\n(이 기기에서 처음 한 번만 받고, 다음부터는 저장된 것을 씁니다)`;
+  }
+  // 모델을 받은 뒤 브라우저가 저장 공간 정리 때 지우지 않도록 '영구 저장'을 요청한다
+  function keepModels() {
+    try { navigator.storage && navigator.storage.persist && navigator.storage.persist(); } catch { /* 지원 안 함 */ }
   }
 
   const STAGE_KO = { segment: "악보 구조 분석", detect: "오선 찾기", dewarp: "기울기 보정", staff: "오선별 음표 읽기",
@@ -373,6 +393,7 @@
       clearInterval(iv);
       if (signal.aborted) return hideOverlay();
     }
+    if (modelsStored === null) await checkModelsStored();
     let pool;
     try {
       pool = await getEngines(engineCount(pages.length - cachedCount));
@@ -446,16 +467,14 @@
         const tPage = performance.now();
         const res = await recognizeOne(engine, blob, signal, ({ stage: s, done, total }) => {
           if (s === "models") {
-            const mb = x => (x / 1048576).toFixed(0);
-            downloading = done >= total ? null
-              : `악보 인식 모델 내려받는 중… ${mb(done)} / ${mb(total)} MB\n(처음 한 번만 받고, 다음부터는 저장된 것을 씁니다)`;
+            downloading = done >= total ? null : modelMsg(done, total);
           } else {
             downloading = null;
             stage[i] = (STAGE_KO[s] || s) + (total > 1 ? ` ${done}/${total}` : "");
           }
           report();
         });
-        if (res.ok) { results[i] = res.musicXml; pageTimes.push((performance.now() - tPage) / 1000); }
+        if (res.ok) { keepModels(); modelsStored = true; results[i] = res.musicXml; pageTimes.push((performance.now() - tPage) / 1000); }
         else if (res.error === "cancelled" || res.error === "timeout") { stage[i] = "대기"; return; }
         else if (res.error === "stalled" || res.error === "engine_missing" || res.error === "worker_lost") {
           fatal = fatal || res.error; stage[i] = "대기";
