@@ -169,6 +169,8 @@
   // 여러 페이지는 PC에서 엔진 두 개로 동시에 읽는다 (폰은 메모리 때문에 하나)
   function engineCount(pages) {
     const mobile = matchMedia("(pointer: coarse)").matches || (navigator.deviceMemory && navigator.deviceMemory < 8);
+    const forced = +new URLSearchParams(location.search).get("engines"); // 시험용: ?engines=3
+    if (forced > 0) return Math.min(forced, Math.max(1, pages));
     return pages > 1 && !mobile ? 2 : 1;
   }
 
@@ -228,30 +230,70 @@
   const STAGE_KO = { segment: "악보 구조 분석", detect: "오선 찾기", dewarp: "기울기 보정", staff: "오선별 음표 읽기",
     ocr: "글자 읽기", xml: "MusicXML 만들기", tab: "타브 확인", models: "모델 준비" };
 
-  // PDF는 페이지마다 이미지(약 300dpi 상당, 긴 변 최대 3000px)로 그린다
-  async function pdfToImages(file, onPage) {
+  // 페이지 공급원: 이미지는 그대로 1장, PDF는 엔진이 가져갈 때마다 한 장씩 그린다
+  // (18쪽짜리를 미리 다 그리면 첫 페이지 인식이 그만큼 늦어지고 메모리도 많이 든다)
+  async function openPages(file) {
+    if (!/\.pdf$/i.test(file.name)) return { count: 1, get: async () => file, close() {} };
     const pdfjs = await import("./lib/pdfjs/pdf.min.mjs");
     pdfjs.GlobalWorkerOptions.workerSrc = new URL("lib/pdfjs/pdf.worker.min.mjs", location.href).href;
     const pdf = await pdfjs.getDocument({ data: new Uint8Array(await file.arrayBuffer()) }).promise;
-    const blobs = [];
-    for (let i = 1; i <= pdf.numPages; i++) {
-      onPage(i, pdf.numPages);
-      const page = await pdf.getPage(i);
+    let chain = Promise.resolve(); // pdf.js 렌더링은 한 번에 하나씩
+    const render = async i => {
+      const page = await pdf.getPage(i + 1);
       const vp1 = page.getViewport({ scale: 1 });
-      const scale = Math.min(300 / 72, 3000 / Math.max(vp1.width, vp1.height));
-      const vp = page.getViewport({ scale });
+      // 약 300dpi 상당, 긴 변 최대 3000px
+      const vp = page.getViewport({ scale: Math.min(300 / 72, 3000 / Math.max(vp1.width, vp1.height)) });
       const canvas = document.createElement("canvas");
       canvas.width = Math.round(vp.width); canvas.height = Math.round(vp.height);
       const g = canvas.getContext("2d");
       g.fillStyle = "#fff"; g.fillRect(0, 0, canvas.width, canvas.height);
       // intent "print": 화면용 렌더링은 requestAnimationFrame을 써서 탭이 가려지면 멈추므로
       await page.render({ canvasContext: g, viewport: vp, intent: "print" }).promise;
-      blobs.push(await new Promise(r => canvas.toBlob(r, "image/png")));
+      const blob = await new Promise(r => canvas.toBlob(r, "image/png"));
       canvas.width = canvas.height = 0; // 폰 메모리 절약
       page.cleanup();
+      return blob;
+    };
+    return {
+      count: pdf.numPages,
+      get: i => (chain = chain.then(() => render(i), () => render(i))),
+      close: () => pdf.destroy(),
+    };
+  }
+
+  /* 인식 결과 저장소 (IndexedDB): 같은 파일을 다시 열면 바로 보여 주고, 중간에 멈췄으면 이어서 읽는다 */
+  const RESULT_VERSION = "homr0.7-1"; // 인식 방식이 바뀌면 올려서 예전 결과를 무효화
+  let dbPromise = null;
+  function db() {
+    if (!dbPromise) {
+      dbPromise = new Promise((res, rej) => {
+        const r = indexedDB.open("pdfscore", 1);
+        r.onupgradeneeded = () => r.result.createObjectStore("pages");
+        r.onsuccess = () => res(r.result);
+        r.onerror = () => rej(r.error);
+      }).catch(err => { console.warn("IndexedDB unavailable", err); return null; });
     }
-    await pdf.destroy();
-    return blobs;
+    return dbPromise;
+  }
+  async function cacheGet(key) {
+    const d = await db();
+    if (!d) return undefined;
+    return new Promise(res => {
+      const r = d.transaction("pages").objectStore("pages").get(key);
+      r.onsuccess = () => res(r.result);
+      r.onerror = () => res(undefined);
+    });
+  }
+  async function cachePut(key, value) {
+    const d = await db();
+    if (!d) return;
+    try { d.transaction("pages", "readwrite").objectStore("pages").put(value, key); } catch { /* 저장 공간 부족 등 */ }
+  }
+  async function fileKey(file) {
+    try {
+      const hash = await crypto.subtle.digest("SHA-256", await file.arrayBuffer());
+      return RESULT_VERSION + ":" + [...new Uint8Array(hash)].map(b => b.toString(16).padStart(2, "0")).join("");
+    } catch { return null; }
   }
 
   // 한 페이지 읽기. 화면이 보이는 동안 진행 소식이 2분 넘게 없으면 멈춘 것으로 보고 "stalled"를 돌려준다
@@ -294,12 +336,35 @@
 
   async function runOmr(file, signal) {
     const title = file.name.replace(OMR_EXT, "");
-    showOverlay("악보 인식 준비 중…", true);
-    const pages = /\.pdf$/i.test(file.name)
-      ? await pdfToImages(file, (i, n) => showOverlay(`PDF 페이지 그리는 중… ${i}/${n}`, true))
-      : [file];
+    showOverlay("악보 여는 중…", true);
+    const src = await openPages(file);
+    try { await runOmrPages(file, src, title, signal); }
+    finally { src.close(); }
+  }
+
+  async function runOmrPages(file, src, title, signal) {
+    const pages = { length: src.count };
+    const key = await fileKey(file);
+    const results = new Array(pages.length);   // 페이지별 MusicXML, 실패하면 null
+    if (key) {
+      const cached = await Promise.all([...Array(pages.length)].map((_, i) => cacheGet(`${key}:${i}`)));
+      cached.forEach((x, i) => { if (x !== undefined) results[i] = x; });
+    }
+    const cachedCount = results.filter(r => r !== undefined).length;
     if (signal.aborted) return hideOverlay();
 
+    if (cachedCount === pages.length) {
+      if (!results.some(Boolean)) { hideOverlay(); throw new Error("이 파일은 전에 악보를 찾지 못한 파일입니다."); }
+      showOverlay("저장된 인식 결과 불러오는 중…");
+      const xml = mergeMusicXml(results.filter(Boolean), title);
+      await loadScoreSafe(xml, title + ".musicxml");
+      lastRecognized = { name: title + ".musicxml", xml };
+      ui.save.hidden = false;
+      hideOverlay();
+      toast("전에 인식해 둔 결과를 바로 불러왔습니다.", 4000);
+      return;
+    }
+    if (cachedCount) toast(`전에 인식해 둔 ${cachedCount}페이지는 건너뛰고 이어서 인식합니다.`, 5000);
     if (warmup) {
       const show = () => showOverlay(warmMsg || "악보 인식 엔진 준비 중…", true);
       show();
@@ -310,7 +375,7 @@
     }
     let pool;
     try {
-      pool = await getEngines(engineCount(pages.length));
+      pool = await getEngines(engineCount(pages.length - cachedCount));
     } catch (err) {
       throw new Error("이 브라우저에서는 악보 인식 엔진을 시작할 수 없습니다. 최신 Chrome, Edge, Safari를 사용해 주세요.\n(" + err.message + ")");
     }
@@ -318,8 +383,8 @@
     console.info("OMR backend:", backend, pool[0].backendReason, "engines:", pool.length);
 
     const t0 = performance.now();
-    const results = new Array(pages.length);   // 페이지별 MusicXML, 실패하면 null
     const stage = new Array(pages.length).fill("대기");
+    const pageTimes = [];  // 새로 인식한 페이지마다 걸린 시간 (남은 시간 계산용)
     let shownUpTo = 0, nextPage = 0, fatal = null, downloading = null;
     const elapsed = () => Math.round((performance.now() - t0) / 1000);
     const status = () => {
@@ -327,7 +392,14 @@
       const head = pages.length > 1 ? `${done}/${pages.length} 페이지 완료 · ` : "";
       const now = stage.map((s, i) => [s, i]).filter(([s]) => s !== "대기" && s !== "완료")
         .map(([s, i]) => (pages.length > 1 ? `${i + 1}쪽 ` : "") + s).join(", ");
-      return `악보 인식 중 — ${head}${now || "정리 중"}\n엔진: ${BACKEND_KO[backend] || backend} · ${elapsed()}초 경과`;
+      const left = pages.length - done;
+      let eta = "";
+      if (left > 0 && pageTimes.length) {
+        const avg = pageTimes.reduce((a, b) => a + b, 0) / pageTimes.length;
+        const sec = Math.round((avg * left) / pool.length);
+        eta = ` · 남은 시간 약 ${sec >= 90 ? Math.round(sec / 60) + "분" : sec + "초"}`;
+      }
+      return `악보 인식 중 — ${head}${now || "정리 중"}\n엔진: ${BACKEND_KO[backend] || backend} · ${elapsed()}초 경과${eta}`;
     };
     const report = () => {
       const msg = downloading || status();
@@ -336,18 +408,25 @@
     const ticker = setInterval(report, 1000);
 
     // 앞에서부터 연속으로 끝난 페이지까지 화면에 보여 준다 (첫 페이지가 끝나면 바로 볼 수 있게)
+    let lastShow = 0;
     const showReady = async final => {
       let k = 0;
       while (k < pages.length && results[k] !== undefined) k++;
       const ready = results.slice(0, k).filter(Boolean);
       if (!ready.length || (k === shownUpTo && !final)) return;
-      if (state.playing && shownUpTo > 0 && !final) return; // 재생 중에는 끊지 않고 나중에 반영
+      if (!final && shownUpTo > 0) {
+        if (state.playing) return;                              // 재생 중에는 끊지 않고 나중에 반영
+        if (performance.now() - lastShow < 45000 && k < pages.length) return; // 45초에 한 번만 다시 그림
+      }
+      const keepScroll = ui.wrap.scrollTop;
       const xml = mergeMusicXml(ready, title);
       const keep = shownUpTo > 0 ? state.parts.map(p => ({ visible: p.visible, audible: p.audible, volume: p.volume, program: p.program })) : null;
       const pos = state.posSec;
       await loadScoreSafe(xml, title + ".musicxml");
       if (keep && keep.length === state.parts.length) restorePartSettings(keep, pos);
+      if (shownUpTo > 0) ui.wrap.scrollTop = keepScroll;
       shownUpTo = k;
+      lastShow = performance.now();
       lastRecognized = { name: title + ".musicxml", xml };
       ui.save.hidden = false;
       if (k < pages.length) { hideOverlay(); report(); }
@@ -359,9 +438,13 @@
       if (idx > 0) await firstPage;
       while (!fatal && !signal.aborted && nextPage < pages.length) {
         const i = nextPage++;
-        if (results[i] !== undefined) continue;
+        if (results[i] !== undefined) { if (i === 0) firstDone(); continue; }
+        stage[i] = "페이지 그리는 중";
+        const blob = await src.get(i);
+        if (signal.aborted) return;
         stage[i] = "시작";
-        const res = await recognizeOne(engine, pages[i], signal, ({ stage: s, done, total }) => {
+        const tPage = performance.now();
+        const res = await recognizeOne(engine, blob, signal, ({ stage: s, done, total }) => {
           if (s === "models") {
             const mb = x => (x / 1048576).toFixed(0);
             downloading = done >= total ? null
@@ -372,12 +455,13 @@
           }
           report();
         });
-        if (res.ok) results[i] = res.musicXml;
+        if (res.ok) { results[i] = res.musicXml; pageTimes.push((performance.now() - tPage) / 1000); }
         else if (res.error === "cancelled" || res.error === "timeout") { stage[i] = "대기"; return; }
         else if (res.error === "stalled" || res.error === "engine_missing" || res.error === "worker_lost") {
           fatal = fatal || res.error; stage[i] = "대기";
           return;
         } else { results[i] = null; console.warn("OMR page failed", i + 1, res.error, res.log); }
+        if (key) cachePut(`${key}:${i}`, results[i]);
         stage[i] = "완료";
         if (i === 0) firstDone();
         await showReady(false);
@@ -417,7 +501,7 @@
     hideOverlay();
     const failed = results.map((r, i) => (r ? 0 : i + 1)).filter(Boolean);
     if (failed.length) toast(`${failed.join(", ")} 페이지는 악보로 인식하지 못해 건너뛰었습니다.`, 6000);
-    else toast(`인식 완료 (${elapsed()}초). 틀린 음이 있을 수 있습니다. 💾 버튼으로 저장해 두면 다음엔 바로 열립니다.`, 6000);
+    else toast(`인식 완료 (${elapsed()}초). 결과는 이 기기에 저장되어, 같은 파일을 다시 열면 바로 열립니다.`, 6000);
   }
 
   function restorePartSettings(keep, pos) {
