@@ -417,6 +417,19 @@ export function parseTabStaff(page, staff, glyphs, verts, beams, bars, fulls = [
   return measures;
 }
 
+/** 2/4·3/4 마디의 온쉼표는 "마디 쉼표"(그 마디 전체를 쉼) — 혼자 있는 성부·보표면 마디 길이로 바꾼다 */
+function barRest(m, full) {
+  if (!(full < 1)) return m;
+  const fit = { 0.25: [4, 0], 0.5: [2, 0], 0.75: [2, 1] }[full];
+  if (!fit) return m;
+  for (const e of m) {
+    if (!e.rest || e.dur !== 1) continue;
+    const same = m.filter(o => (o.voice || 1) === (e.voice || 1) && (o.staff || 0) === (e.staff || 0));
+    if (same.length === 1) { e.dur = fit[0]; e.dots = fit[1]; }
+  }
+  return m;
+}
+
 /** 오선보의 작은 음표머리(꾸밈음) 가로 위치. 작은 X 머리는 보통 X 머리와 모양이 같고 크기만 작아 분류되지 않는다 */
 function smallHeadXs(staff, glyphs) {
   const g = staff.gap;
@@ -446,6 +459,7 @@ export function fixOverfull(m, parens, full = 1) {
   if (measureLength(m) <= full + 1e-6) return;
   for (const e of m) if (e.dur === 1 && e.dots && full <= 1) e.dots = 0;
   if (measureLength(m) <= full + 1e-6) return;
+  if (dropParenAlt(m, parens, full)) return;
   const open = parens.filter(q => q.x > (m.x0 ?? -1e9) && q.x < (m.x1 ?? 1e9)).sort((a, b) => a.x - b.x)[0];
   if (open) {
     const keep = m.filter(e => e.x < open.bbox[0]);
@@ -459,6 +473,35 @@ export function fixOverfull(m, parens, full = 1) {
     const hit = opts.find(([d, dot]) => Math.abs((1 / d) * (dot ? 1.5 : 1) - left) < 1e-6);
     if (hit) { loose[0].dur = hit[0]; loose[0].dots = hit[1]; }
   }
+}
+
+/**
+ * "2× ( … )": 괄호 쌍이 마디 안에 있으면 그 사이(반복할 때만 바꾸는 부분)를 뺀다.
+ * 빼고 나서 마디 길이가 정확히 맞을 때만 (괄호 안이 꼭 필요한 음이면 둔다)
+ */
+function dropParenAlt(m, parens, full) {
+  if (measureLength(m) <= full + 1e-6) return false;
+  const inM = parens.filter(q => q.x > (m.x0 ?? -1e9) && q.x < (m.x1 ?? 1e9)).sort((a, b) => a.x - b.x);
+  if (inM.length < 2) return false;
+  const [o, c] = inM;
+  // 괄호의 세로 범위 안에 있는 음만 (바로 위아래의 다른 음은 괄호 밖)
+  const y0 = Math.min(o.bbox[1], c.bbox[1]) - 0.5, y1 = Math.max(o.bbox[3], c.bbox[3]) + 0.5;
+  const yOf = e => e.notes?.length ? e.notes.reduce((a, n) => a + (n.cy ?? (y0 + y1) / 2), 0) / e.notes.length : e.cy ?? (y0 + y1) / 2;
+  const inside = e => !(e.x < o.bbox[0] || e.x > c.bbox[2] || yOf(e) < y0 || yOf(e) > y1);
+  const fits = k => k.length < m.length && Math.abs(measureLength(k) - full) < 1e-6;
+  let keep = m.filter(e => !inside(e));
+  // 괄호 안에 두 성부(같은 머리를 두 번 그린 대안)가 있으면 한 성부만 빼 본다 — 괄호 밖에도 음이 있는 마디만
+  const inX = e => e.x >= o.bbox[0] && e.x <= c.bbox[2];
+  if (!fits(keep) && m.some(e => !e.rest && !inX(e))) {
+    // 괄호(대안)는 대안 성부 쪽 높이에 그려지므로, 괄호에 가까운 성부부터 뺀다
+    const pc = (y0 + y1) / 2;
+    const near = v => { const es = m.filter(e => inX(e) && (e.voice || 1) === v); return es.length ? es.reduce((a, e) => a + Math.abs(yOf(e) - pc), 0) / es.length : 1e9; };
+    keep = [1, 2].sort((a, b) => near(a) - near(b)).map(v => m.filter(e => !inX(e) || (e.voice || 1) !== v)).find(fits);
+  }
+  if (!keep || !fits(keep)) return false;
+  for (const e of keep) e.voice = 1;
+  m.splice(0, m.length, ...keep);
+  return true;
 }
 
 /**
@@ -641,9 +684,20 @@ export function parseStdStaff(page, staff, glyphs, verts, beams, bars, opts = {}
     (q.bbox[1] + q.bbox[3]) / 2 > staff.top - g * 5 && (q.bbox[1] + q.bbox[3]) / 2 < staff.bottom + g * 5);
   // 음표머리는 가장 가까운 보표의 것 (위아래 보표의 덧줄 음과 헷갈리지 않게)
   const distTo = (st, cy) => cy < st.top ? st.top - cy : cy > st.bottom ? cy - st.bottom : 0;
+  const allStaves = [staff, ...(opts.others || []).filter(o => o !== staff)];
+  const ownerOf = cy => allStaves.reduce((b, o) => distTo(o, cy) < distTo(b, cy) ? o : b, staff);
+  // 화음은 한 덩어리로: 같은 x에 세로로 이어진 머리들 중 보표에 가장 붙어 있는 머리가 정한 보표의 것
+  // (오른손 화음의 덧줄 아래 머리가 왼손 보표에 더 가까워도 오른손 것)
+  const allHeads = glyphs.filter(q => HEADS.has(q.cls));
+  const cyOf = q => (q.bbox[1] + q.bbox[3]) / 2;
   const mineHead = q => {
-    const cy = (q.bbox[1] + q.bbox[3]) / 2, d = distTo(staff, cy);
-    return !(opts.others || []).some(o => o !== staff && distTo(o, cy) < d);
+    const cl = [q];
+    for (let grow = true; grow;) {
+      grow = false;
+      for (const h of allHeads) if (!cl.includes(h) && Math.abs(h.bbox[0] - q.bbox[0]) < 1 && cl.some(c => Math.abs(cyOf(c) - cyOf(h)) < g * 1.6)) { cl.push(h); grow = true; }
+    }
+    const anchor = cl.reduce((b, h) => distTo(ownerOf(cyOf(h)), cyOf(h)) < distTo(ownerOf(cyOf(b)), cyOf(b)) ? h : b);
+    return ownerOf(cyOf(anchor)) === staff;
   };
   const heads = near.filter(q => HEADS.has(q.cls) && q.x > staff.x0 + 8 && mineHead(q));
   const firstX = Math.min(...heads.map(h => h.bbox[0]), staff.x1);
@@ -657,7 +711,10 @@ export function parseStdStaff(page, staff, glyphs, verts, beams, bars, opts = {}
     if (h.cls === "head_whole") continue;
     const cy = (h.bbox[1] + h.bbox[3]) / 2;
     let best = null, bd = 1.3;
+    // 두 성부가 같은 음을 공유하면 같은 머리가 두 번 그려진다 — 겹친 쌍은 서로 다른 기둥에
+    const twin = heads.find(o => o !== h && stemOf.has(o) && o.bbox.every((v, i) => Math.abs(v - h.bbox[i]) < 0.1));
     for (const s of stems) {
+      if (twin && stemOf.get(twin) === s) continue;
       // 보통 머리는 가장자리에, X 머리는 가운데에 기둥이 붙는다
       const dx = h.cls === "head_x" || h.cls === "head_xo" ? Math.abs(s.x - (h.bbox[0] + h.bbox[2]) / 2)
         : Math.min(Math.abs(s.x - h.bbox[2]), Math.abs(s.x - h.bbox[0]));
@@ -766,7 +823,8 @@ export function parseStdStaff(page, staff, glyphs, verts, beams, bars, opts = {}
     if (e.notes.length && !e.repeatPrev) prev = e.notes;
   }
   // 붙임줄: 다음 사건에 같은 음이 있고, 그 사이에 둥근 곡선(사전에 없는 납작한 기호)이 있으면
-  const arcs = glyphs.filter(q => !q.cls && q.bbox[2] - q.bbox[0] > 3 && q.bbox[3] - q.bbox[1] < g * 1.3 &&
+  // 마디를 넘는 긴 붙임줄은 곡선이 조금 더 높다
+  const arcs = glyphs.filter(q => !q.cls && q.bbox[2] - q.bbox[0] > 3 && q.bbox[3] - q.bbox[1] < (q.bbox[2] - q.bbox[0] > 40 ? g * 2 : g * 1.3) &&
     q.x > staff.x0 && q.x < staff.x1 && q.bbox[1] > staff.top - g * 4 && q.bbox[3] < staff.bottom + g * 4);
   const flat = measures.flat().filter(e => !e.rest).sort((a, b) => a.x - b.x);
   for (let i = 0; i + 1 < flat.length; i++) {
@@ -775,8 +833,8 @@ export function parseStdStaff(page, staff, glyphs, verts, beams, bars, opts = {}
     for (const n of b.notes) {
       const src = a.notes.find(o => o.step === n.step && o.oct === n.oct);
       if (!src) continue;
-      const arc = arcs.find(q => q.bbox[0] > a.x1 - 2 && q.bbox[2] < b.x + 3 && Math.abs((q.bbox[1] + q.bbox[3]) / 2 - n.cy) < g * 1.6);
-      if (arc) n.tie = true;
+      const arc = arcs.find(q => q.bbox[0] > a.x1 - 2 && q.bbox[2] < b.x + 3 && Math.abs((q.bbox[1] + q.bbox[3]) / 2 - n.cy) < (q.bbox[2] - q.bbox[0] > 40 ? g * 2 : g * 1.6));
+      if (arc) { n.tie = true; n.alter = src.alter; } // 붙임줄로 이어진 음은 마디를 넘어도 앞 음의 임시표 그대로
     }
   }
   const signs = near.filter(q => q.cls === "repeat1" || q.cls === "repeat2").filter(q => !events.some(e => e.stem && Math.abs(e.stem.x - (q.bbox[0] + q.bbox[2]) / 2) < 2.5));
@@ -784,7 +842,7 @@ export function parseStdStaff(page, staff, glyphs, verts, beams, bars, opts = {}
   const bigParens = near.filter(q => q.cls === "paren" && q.bbox[3] - q.bbox[1] > g * 2);
   // 2성부로 나눌 수 있는 마디는 길이가 넘치는 게 정상이므로 건드리지 않는다
   const fullOf = i => opts.fulls?.[i] ?? 1;
-  measures.forEach((m, i) => { if (!opts.drums && !m.some(e => e.voice === 2) && !splitVoices(m, fullOf(i))) fixOverfull(m, bigParens, fullOf(i)); });
+  measures.forEach((m, i) => { if (!opts.drums && !dropParenAlt(m, bigParens, fullOf(i)) && !m.some(e => e.voice === 2) && !splitVoices(m, fullOf(i))) fixOverfull(m, bigParens, fullOf(i)); });
   measures.forEach((m, i) => fillAmbiguous(m, edges[i + 1], fullOf(i)));
   measures.clef = clef; measures.key = key;
   return measures;
@@ -998,7 +1056,10 @@ function parseSystems(list) {
   const layoutCache = new Map();
   let ts = [4, 4];
   const beamCache = new Map();
+  const multiRepeats = [], sysStart = [];
+  let sysNo = -1;
   for (const { pg, pi, sys, sig } of list) {
+    sysNo++;
     {
       const verts = verticalRects(pg);
       if (!beamCache.has(pg)) beamCache.set(pg, beamsOf(pg));
@@ -1040,8 +1101,28 @@ function parseSystems(list) {
         if (!t) { t = { ...p, index: parts.length, measures: [] }; parts.push(t); while (t.measures.length < bars.length) t.measures.push([]); }
         return t;
       });
+      // 여러 마디 반복 기호: 숫자(4 등) 아래 "///"가 마디줄 위에 걸쳐 있다. 그 마디줄을 가운데로 하는 n마디가 앞 n마디의 반복
+      for (const [k, p] of layout.entries()) {
+        const st = sys.staves[p.std ?? p.tab], g = st.gap;
+        for (const d of pg.glyphs) {
+          const n = +(/^(?:n|v|ts)(\d)$/.exec(d.cls || "") || [])[1];
+          if (!(n >= 2) || d.bbox[3] > st.top + 1 || d.bbox[3] < st.top - g * 3) continue;
+          const cx = (d.bbox[0] + d.bbox[2]) / 2;
+          const slashes = pg.glyphs.filter(q => (q.cls === "slash" || q.cls === "repeat1" || q.cls === "repeat2") && Math.abs((q.bbox[0] + q.bbox[2]) / 2 - cx) < 6 &&
+            q.bbox[1] > st.top - 1 && q.bbox[3] < st.bottom + 1);
+          const j = edges.findIndex(x => Math.abs(x - cx) < 5);
+          if (slashes.length >= 2 && j > 0 && n >= 3) multiRepeats.push({ part: targets[k], n, sys: sysNo, j });
+          // 2마디 반복이 줄바꿈에 걸리면 단 끝과 다음 단 시작에 반쪽(빗금 하나)씩 그린다. 가운데는 줄바꿈 마디줄
+          else if (n === 2 && slashes.length === 1) {
+            if (cx > edges[edges.length - 1] - 10) multiRepeats.push({ part: targets[k], n, sys: sysNo, at: "end" });
+            else if (cx < edges[0] + 25) multiRepeats.push({ part: targets[k], n, sys: sysNo, at: "start" });
+          }
+        }
+      }
       const restN = multiRestCounts(sys, pg, pg.glyphs, edges);
+      sysStart.push([]);
       for (let i = 0; i < nMeasures; i++) {
+        sysStart[sysNo][i] = bars.length;
         // 여러 마디 쉼표는 그 수만큼 빈 마디로 펼친다
         for (let r = 0; r < restN[i]; r++) {
           // 마디 앞의 조표 변경(샵/플랫 2개 이상) — 본편과 부록을 맞출 때 기준점으로 쓴다
@@ -1051,7 +1132,7 @@ function parseSystems(list) {
           const rehearsal = r === 0 && pg.glyphs.some(q => q.cls === "rbox" && q.bbox[3] < sys.staves[0].top && q.bbox[3] > sys.staves[0].top - 32 &&
             (q.bbox[0] + q.bbox[2]) / 2 > edges[i] - 4 && (q.bbox[0] + q.bbox[2]) / 2 < edges[i + 1] - 4);
           bars.push({ ts: tsList[i], page: pi, x: edges[i], nav: r === 0 ? nav[i] || {} : {}, multiRest: restN[i] > 1, keyChange: keyMark >= 2, rehearsal });
-          layout.forEach((p, k) => targets[k].measures.push(r === 0 ? parsed[k][i] || [] : []));
+          layout.forEach((p, k) => targets[k].measures.push(r === 0 ? barRest(parsed[k][i] || [], fulls[i]) : []));
           parts.forEach(pp => { while (pp.measures.length < bars.length) pp.measures.push([]); });
         }
         continue;
@@ -1060,10 +1141,16 @@ function parseSystems(list) {
       }
     }
   }
+  const cp = src => { const r = (src || []).map(e => ({ ...e, notes: e.notes.map(n => ({ ...n })) })); r.x0 = src?.x0; r.x1 = src?.x1; return r; };
+  // 여러 마디 반복: 가운데 마디줄 앞뒤로 n/2마디씩 (줄이 바뀌어도 이어진다)
+  for (const { part, n, sys, j, at } of multiRepeats) {
+    const center = at === "end" ? sysStart[sys][sysStart[sys].length - 1] + 1 : at === "start" ? sysStart[sys][0] : sysStart[sys][j];
+    for (let c = center - Math.floor(n / 2); c < center + Math.ceil(n / 2); c++)
+      if (c - n >= 0 && c < part.measures.length) part.measures[c] = cp(part.measures[c - n]);
+  }
   // 두 마디 반복 기호
   for (const p of parts) p.measures.forEach((m, i) => {
     if (m.repeatOf2 && i >= 2) {
-      const cp = src => { const r = (src || []).map(e => ({ ...e, notes: e.notes.map(n => ({ ...n })) })); r.x0 = src?.x0; r.x1 = src?.x1; return r; };
       p.measures[i] = cp(p.measures[i - 2]);
       p.measures[i + 1] = cp(p.measures[i - 1]);
     }
