@@ -48,7 +48,7 @@ export function findStaves(page) {
 
 /** 세로로 긴 얇은 사각형 = 마디줄/기둥/단 묶음선 */
 export function verticalRects(page) {
-  return page.rects.filter(r => r.x1 - r.x0 < 1.6 && r.y1 - r.y0 > 2)
+  return page.rects.filter(r => r.x1 - r.x0 < 2.4 && r.y1 - r.y0 > 2) // 굵은 마디줄(약 1.8pt)까지
     .map(r => ({ x: (r.x0 + r.x1) / 2, w: r.x1 - r.x0, y0: r.y0, y1: r.y1 }));
 }
 
@@ -146,6 +146,19 @@ function beamsOf(page) {
     .map(r => ({ x0: r.x0, x1: r.x1, y0: r.y0, y1: r.y1 }));
   for (const p of page.polys) if (!p.curved && p.pts.length >= 4 && p.bbox[2] - p.bbox[0] > 2 && p.bbox[3] - p.bbox[1] < 12)
     out.push({ x0: p.bbox[0], x1: p.bbox[2], y0: p.bbox[1], y1: p.bbox[3], poly: p });
+  // 기울어진 빔은 기호처럼 "이동 + 평행사변형"으로 그려지기도 한다
+  for (const g of page.glyphs) {
+    if (g.cls) continue;
+    const ops = g.segs.map(q => q.op).join("");
+    if (!/^0111(3)?$/.test(ops)) continue;
+    const w = g.bbox[2] - g.bbox[0], h = g.bbox[3] - g.bbox[1];
+    if (w < 3 || h > 12) continue;
+    // 세로로 평행한 두 변(같은 x 위에 두 점씩)이어야 빔
+    const pts = g.segs.filter(q => q.op <= 1).map(q => q.pts[0]);
+    const xs = [...new Set(pts.map(v => Math.round(v * 10)))];
+    if (xs.length !== 2) continue;
+    out.push({ x0: g.bbox[0], x1: g.bbox[2], y0: g.bbox[1], y1: g.bbox[3], sloped: true });
+  }
   return out;
 }
 export { beamsOf };
@@ -446,7 +459,13 @@ export function parseStdStaff(page, staff, glyphs, verts, beams, bars, opts = {}
   const clef = opts.clef || clefOf(staff, glyphs) || "G";
   const near = glyphs.filter(q => q.cls && q.x > staff.x0 - 2 && q.x < staff.x1 + 2 &&
     (q.bbox[1] + q.bbox[3]) / 2 > staff.top - g * 5 && (q.bbox[1] + q.bbox[3]) / 2 < staff.bottom + g * 5);
-  const heads = near.filter(q => HEADS.has(q.cls) && q.x > staff.x0 + 8);
+  // 음표머리는 가장 가까운 보표의 것 (위아래 보표의 덧줄 음과 헷갈리지 않게)
+  const distTo = (st, cy) => cy < st.top ? st.top - cy : cy > st.bottom ? cy - st.bottom : 0;
+  const mineHead = q => {
+    const cy = (q.bbox[1] + q.bbox[3]) / 2, d = distTo(staff, cy);
+    return !(opts.others || []).some(o => o !== staff && distTo(o, cy) < d);
+  };
+  const heads = near.filter(q => HEADS.has(q.cls) && q.x > staff.x0 + 8 && mineHead(q));
   const firstX = Math.min(...heads.map(h => h.bbox[0]), staff.x1);
   const key = opts.key ?? keyOf(staff, glyphs, firstX);
   const stems = verts.filter(v => v.w < 0.8 && v.y1 - v.y0 > g * 1.5 && v.x > staff.x0 && v.x < staff.x1 &&
@@ -506,7 +525,7 @@ export function parseStdStaff(page, staff, glyphs, verts, beams, bars, opts = {}
     const d = { rest4: 4, rest8: 8, rest16: 16 }[q.cls];
     const cy = (q.bbox[1] + q.bbox[3]) / 2;
     if (d && cy > staff.top - g && cy < staff.bottom + g)
-      events.push({ x: q.bbox[0], x1: q.bbox[2], dur: d, dots: 0, rest: true, notes: [], voice: cy < (staff.top + staff.bottom) / 2 - g ? 1 : cy > (staff.top + staff.bottom) / 2 + g ? 2 : 0 });
+      events.push({ x: q.bbox[0], x1: q.bbox[2], cy, dur: d, dots: 0, rest: true, notes: [], voice: cy < (staff.top + staff.bottom) / 2 - g ? 1 : cy > (staff.top + staff.bottom) / 2 + g ? 2 : 0 });
   }
   for (const r of rectRests(page, staff, verts)) events.push({ ...r, x1: r.x + 2, voice: 0 });
   // 점
@@ -515,8 +534,9 @@ export function parseStdStaff(page, staff, glyphs, verts, beams, bars, opts = {}
   for (const d of dots) {
     const dx = (d.bbox[0] + d.bbox[2]) / 2, dy = (d.bbox[1] + d.bbox[3]) / 2;
     let best = null;
-    for (const e of events) if (e.x1 + 0.2 < dx && dx - e.x1 < 4.5 &&
-      (e.rest || e.notes.some(n => Math.abs(n.cy - dy) < g * 0.9))) best = e;
+    // 점은 높이가 맞는 음(또는 쉼표) 오른쪽에만 붙는다
+    for (const e of events) if (e.x1 + 0.2 < dx && dx - e.x1 < 6 &&
+      (e.rest ? e.cy !== undefined && Math.abs(e.cy - dy) < g * 1.5 : e.notes.some(n => Math.abs(n.cy - dy) < g * 0.9))) best = e;
     if (best) best.dots = 1;
   }
   // 셋잇단
@@ -540,6 +560,10 @@ export function parseStdStaff(page, staff, glyphs, verts, beams, bars, opts = {}
       n.alter = local[k] ?? keyAlter[n.step] ?? 0;
     }
     m.x0 = edges[i]; m.x1 = edges[i + 1];
+    // 진짜 2성부는 같은 박에 위·아래 기둥이 함께 있을 때뿐. 아니면 기둥 방향과 관계없이 한 성부
+    const poly = m.some(a => !a.rest && a.voice === 1 && m.some(b => !b.rest && b.voice === 2 && Math.abs(a.x - b.x) < 2.5));
+    for (const e of m) e.stemVoice = e.voice; // 기둥 방향은 나중에 성부 나누기에 다시 쓴다
+    if (!poly && !opts.drums) for (const e of m) e.voice = 1;
     measures.push(m);
   }
   // 머리 없는 기둥은 앞 화음 반복
@@ -617,6 +641,15 @@ export function partsOfSystem(sys, glyphs) {
     if (hs.length >= 4 && xs / hs.length > 0.2) p.kind = "drums";
     p.clef = clefOf(st, glyphs);
   }
+  // 보표 왼쪽의 파트 이름 (Vo, Gt-I, Syn, Ba, Dr …)
+  for (const p of parts) {
+    const ks = [p.std, p.tab, p.lower].filter(k => k !== undefined && k !== null).map(k => sys.staves[k]);
+    const top = Math.min(...ks.map(s => s.top)) - 8, bot = Math.max(...ks.map(s => s.bottom)) + 8;
+    const x0 = Math.min(...ks.map(s => s.x0));
+    const chars = glyphs.filter(q => q.cls && q.cls.startsWith("ch_") && q.bbox[2] < x0 + 0.5 && q.bbox[0] > x0 - 45 &&
+      (q.bbox[1] + q.bbox[3]) / 2 > top && (q.bbox[1] + q.bbox[3]) / 2 < bot).sort((a, b) => a.x - b.x);
+    if (chars.length) p.label = chars.map(q => q.cls.slice(3)).join("");
+  }
   for (let i = 0; i + 1 < parts.length; i++) {
     const a = parts[i], b = parts[i + 1];
     if (a.kind === "std" && b.kind === "std" && a.clef === "G" && b.clef === "F") {
@@ -669,14 +702,17 @@ export function parseBandScore(pages) {
         if (t) ts = t;
         tsList.push(ts.slice());
       }
+      // 도돌이표 점을 먼저 골라내야 점음표의 점으로 잘못 붙지 않는다
+      const rdots = markRepeatDots(sys, pg.glyphs, verts);
+      const nav = navigationMarks(sys, pg.glyphs, edges, rdots);
       const parsed = layout.map(p => {
         if (p.kind === "guitar" || p.kind === "bass") return parseTabStaff(pg, sys.staves[p.tab], pg.glyphs, verts, beams, sb);
         if (p.kind === "piano") {
-          const up = parseStdStaff(pg, sys.staves[p.std], pg.glyphs, verts, beams, sb);
-          const lo = parseStdStaff(pg, sys.staves[p.lower], pg.glyphs, verts, beams, sb);
+          const up = parseStdStaff(pg, sys.staves[p.std], pg.glyphs, verts, beams, sb, { others: sys.staves });
+          const lo = parseStdStaff(pg, sys.staves[p.lower], pg.glyphs, verts, beams, sb, { others: sys.staves });
           return up.map((m, i) => { const r = [...m.map(e => ({ ...e, staff: 0 })), ...(lo[i] || []).map(e => ({ ...e, staff: 1 }))]; r.repeatOf2 = m.repeatOf2; return r; });
         }
-        return parseStdStaff(pg, sys.staves[p.std], pg.glyphs, verts, beams, sb);
+        return parseStdStaff(pg, sys.staves[p.std], pg.glyphs, verts, beams, sb, { drums: p.kind === "drums", others: sys.staves });
       });
       // 이 단의 파트 → 전체 파트: 종류와 그 종류 안의 순번으로 맞춘다 (단마다 보표 수가 달라도 섞이지 않게)
       const ord = {};
@@ -687,7 +723,7 @@ export function parseBandScore(pages) {
         return t;
       });
       for (let i = 0; i < nMeasures; i++) {
-        bars.push({ ts: tsList[i], page: pi, x: edges[i] });
+        bars.push({ ts: tsList[i], page: pi, x: edges[i], nav: nav[i] || {} });
         layout.forEach((p, k) => targets[k].measures.push(parsed[k][i] || []));
         // 이 단에 없는 파트는 빈 마디
         parts.forEach(pp => { while (pp.measures.length < bars.length) pp.measures.push([]); });
@@ -730,7 +766,7 @@ export function alignVoices(voices, full, x0, x1) {
     }
     return 0;
   };
-  const snap = v => Math.round(v * 96) / 96; // 32분음표 셋잇단 정도까지
+  const snap = v => Math.round(v * 32) / 32; // 32분음표 단위
   const out = {};
   for (const k of keys) {
     if (k === primary || Math.abs(lens[k] - full) < 1e-6) { out[k] = [...voices[k]].sort((a, b) => a.x - b.x); continue; }
@@ -748,6 +784,28 @@ export function alignVoices(voices, full, x0, x1) {
     out[k] = seq;
   }
   return out;
+}
+
+/**
+ * 한 성부로 보았을 때 마디가 넘치면 두 성부로 나눠 본다.
+ *  1) 기둥 방향으로 (기둥 없는 온음표는 맞는 쪽으로)
+ *  2) 기둥 없는 긴 음(온음표·2분음표)만 따로
+ * 두 성부 모두 마디 길이를 넘지 않는 나눔을 고른다. 못 찾으면 null
+ */
+export function splitVoices(m, full) {
+  const fits = (a, b) => measureLength(a) <= full + 1e-6 && measureLength(b) <= full + 1e-6 && a.some(e => !e.rest) && b.some(e => !e.rest);
+  const notes = m.filter(e => !e.rest);
+  const rests = m.filter(e => e.rest);
+  const stemless = notes.filter(e => !e.stem);
+  const byDir = d => notes.filter(e => e.stem && (e.stemVoice || 1) === d);
+  for (const wholeTo of [1, 2]) {
+    const a = [...byDir(1), ...(wholeTo === 1 ? stemless : [])], b = [...byDir(2), ...(wholeTo === 2 ? stemless : [])];
+    if (fits(a, b)) return { 1: a, 2: b };
+  }
+  const longOnes = stemless.filter(e => e.dur <= 2);
+  const others = notes.filter(e => !longOnes.includes(e));
+  if (fits(others, longOnes)) return { 1: others, 2: longOnes };
+  return null;
 }
 
 /* ------------------------------------------------- 9) alphaTex 만들기 */
@@ -804,6 +862,31 @@ function beatTex(e, kind, strings = 6) {
   return `:${e.dur} ${body}${fx.length ? `{${fx.join(" ")}}` : ""}`;
 }
 
+/** 악보에 적힌 파트 이름 → 트랙 이름 */
+function labelName(t) {
+  const roman = { I: 1, II: 2, III: 3, IV: 4 };
+  if (/^Vo/i.test(t)) return "Vocal";
+  if (/^Syn/i.test(t)) return "Synth";
+  if (/^Ba/i.test(t)) return "Bass";
+  if (/^Dr/i.test(t)) return "Drums";
+  const g = t.match(/^Gt-?(I+|IV|\d)?/);
+  if (g) return "Guitar" + (g[1] ? " " + (roman[g[1]] || g[1]) : "");
+  return t;
+}
+
+/** 마디 앞에 붙는 연주 순서 메타데이터 */
+function navTex(nav = {}, hasCoda) {
+  let t = "";
+  if (nav.repeatStart) t += "\\ro ";
+  if (nav.volta) t += `\\ae (${nav.volta}) `;
+  if (nav.repeatEnd) t += "\\rc 2 ";
+  if (nav.segno) t += "\\jump Segno ";
+  if (nav.coda) t += "\\jump Coda ";
+  if (nav.toCoda) t += "\\jump DaCoda ";
+  if (nav.ds) t += hasCoda ? "\\jump DalSegnoAlCoda " : "\\jump DalSegno ";
+  return t;
+}
+
 const TUNINGS = { 6: "e4 b3 g3 d3 a2 e2", 4: "g2 d2 a1 e1", 5: "g2 d2 a1 e1 b0", 7: "e4 b3 g3 d3 a2 e2 b1" };
 
 export function toAlphaTex(score, title = "", tempo = 120) {
@@ -811,17 +894,36 @@ export function toAlphaTex(score, title = "", tempo = 120) {
   const names = { std: "Vocal", guitar: "Guitar", bass: "Bass", drums: "Drums", piano: "Keyboard" };
   const programs = { std: 53, guitar: 29, bass: 33, piano: 0 };
   let gtr = 0, std = 0;
+  const hasCoda = bars.some(b => b.nav && b.nav.coda);
   let tex = `\\title "${title.replace(/"/g, "'")}"\n\\tempo ${tempo}\n.\n`;
   for (const p of parts) {
     let name = names[p.kind];
     if (p.kind === "guitar") name = `Guitar ${++gtr}`;
     if (p.kind === "std") name = ++std === 1 ? "Vocal" : `Part ${std}`;
+    if (p.label) name = labelName(p.label) || name;
     const kind = p.kind === "guitar" || p.kind === "bass" ? "tab" : p.kind === "drums" ? "drums" : "std";
     tex += `\\track "${name}"\n`;
     if (kind === "drums") tex += `\\instrument percussion\n\\articulation defaults\n\\staff {score}\n`;
     else if (kind === "tab") tex += `\\instrument ${programs[p.kind]}\n\\staff {score tabs}\n\\tuning ${TUNINGS[p.strings] || TUNINGS[6]}\n` + (p.kind === "bass" ? "\\clef F4\n" : "");
     else tex += `\\instrument ${programs[p.kind] ?? 0}\n\\staff {score}\n` + (p.clef === "F" ? "\\clef F4\n" : "");
-    const voiceCount = kind === "drums" || p.kind === "piano" || p.measures.some(m => m.some(e => e.voice === 2) && m.some(e => e.voice === 1)) ? 2 : 1;
+    // 마디마다 성부 나누기를 미리 정해 둔다
+    const voiced = p.measures.map((m, i) => {
+      const full = bars[i].ts[0] / bars[i].ts[1];
+      if (p.kind === "piano") return null;
+      const vs = { 1: m.filter(e => (e.voice || 1) === 1), 2: m.filter(e => e.voice === 2) };
+      if (vs[1].length && vs[2].length) return alignVoices(vs, full, m.x0 ?? Math.min(...m.map(e => e.x)) - 5, m.x1 ?? Math.max(...m.map(e => e.x)) + 20);
+      // 다른 성부용 온쉼표가 함께 적혀 넘치는 경우: 음표만으로 마디가 맞으면 그 쉼표는 뺀다
+      if (measureLength(m) > full + 1e-6 && m.some(e => e.rest && e.dur === 1)) {
+        const keep = m.filter(e => !(e.rest && e.dur === 1));
+        if (measureLength(keep) <= full + 1e-6) { m.splice(0, m.length, ...keep); }
+      }
+      if (kind !== "drums" && measureLength(m) > full + 1e-6) {
+        const sp = splitVoices(m, full);
+        if (sp) return alignVoices(sp, full, m.x0 ?? -1e9, m.x1 ?? 1e9);
+      }
+      return null;
+    });
+    const voiceCount = kind === "drums" || p.kind === "piano" || voiced.some(Boolean) ? 2 : 1;
     for (let v = 1; v <= voiceCount; v++) {
       if (voiceCount > 1) tex += `\\voice\n`;
       let lastTs = null;
@@ -830,16 +932,14 @@ export function toAlphaTex(score, title = "", tempo = 120) {
         let evs = [...m].sort((a, b) => a.x - b.x);
         if (voiceCount > 1) {
           if (p.kind === "piano") evs = evs.filter(e => (e.staff ?? 0) === v - 1);
-          else {
-            const vs = { 1: m.filter(e => (e.voice || 1) === 1), 2: m.filter(e => e.voice === 2) };
-            const aligned = vs[2].length && vs[1].length ? alignVoices(vs, full, m.x0 ?? Math.min(...m.map(e => e.x)) - 5, m.x1 ?? Math.max(...m.map(e => e.x)) + 20) : vs;
-            evs = aligned[v] || [];
-          }
+          else if (voiced[i]) evs = voiced[i][v] || [];
+          else evs = v === 1 ? evs : [];
         }
         const fitted = fitMeasure(evs, full);
         let head = "";
         const t = bars[i].ts.join(" ");
         if (t !== lastTs) { head = `\\ts ${t} `; lastTs = t; }
+        if (p === parts[0] && v === 1) head = navTex(bars[i].nav, hasCoda) + head; // 연주 순서는 첫 트랙에만
         tex += head + fitted.map(e => beatTex(e, kind, p.strings)).join(" ") + " |\n";
       });
     }
@@ -911,4 +1011,73 @@ export function looksLikeBandScore(pages) {
     systems += groupSystems(findStaves(pg), verticalRects(pg)).filter(s => s.staves.length > 3).length;
   }
   return systems > 0 && total > 50 && labeled / total > 0.2;
+}
+
+/* ------------------------------------------------- 11) 연주 순서 (도돌이표·괄호·D.S.·Coda) */
+
+/**
+ * 도돌이표 점: 굵은 마디줄 바로 옆, 보표 가운데 두 칸에 위아래로 찍힌 점 한 쌍.
+ * 점음표의 점과 모양이 같으므로 먼저 골라내서 "repeat_dot"으로 바꿔 둔다.
+ * @returns {{x:number, side:"start"|"end"}[]}
+ */
+export function markRepeatDots(sys, glyphs, verts) {
+  const found = [];
+  for (const st of sys.staves) {
+    const bars = findBarlines(st, verts).filter(b => b.thick || b.double);
+    const mid = (st.top + st.bottom) / 2;
+    for (const b of bars) {
+      for (const side of ["start", "end"]) {
+        const ds = glyphs.filter(q => q.cls === "dot" && Math.abs((q.bbox[1] + q.bbox[3]) / 2 - mid) < st.gap * 1.2 &&
+          (side === "end" ? q.bbox[2] <= b.x + 0.3 && b.x - q.bbox[2] < 3.5 : q.bbox[0] >= b.x1 - 0.3 && q.bbox[0] - b.x1 < 3.5));
+        if (ds.length >= 2) {
+          ds.forEach(q => (q.cls = "repeat_dot"));
+          if (st === sys.staves[0]) found.push({ x: side === "end" ? b.x : b.x1, side });
+        }
+      }
+    }
+  }
+  return found;
+}
+
+/**
+ * 단 하나의 연주 순서 표시를 마디별로 정리
+ * @returns 마디 인덱스별 { repeatStart, repeatEnd, volta, segno, coda, toCoda, ds }
+ */
+export function navigationMarks(sys, glyphs, edges, repeatDots) {
+  const n = edges.length - 1;
+  const marks = Array.from({ length: n }, () => ({}));
+  const top = sys.staves[0].top, bottom = sys.bottom;
+  const measureAt = x => { for (let i = 0; i < n; i++) if (x >= edges[i] - 1 && x < edges[i + 1] + 1) return i; return x < edges[0] ? 0 : n - 1; };
+  for (const d of repeatDots) {
+    if (d.side === "start") { const i = measureAt(d.x + 2); marks[i].repeatStart = true; }
+    else { const i = measureAt(d.x - 2); marks[i].repeatEnd = true; }
+  }
+  const above = q => q.bbox[3] < top - 1 && q.bbox[3] > top - 32;
+  // 1·2번 괄호: 보표 위의 숫자와, 그 숫자 바로 왼쪽에서 시작하는 넓은 꺾쇠 선
+  const wide = glyphs.filter(q => !q.cls && above(q) && q.bbox[2] - q.bbox[0] > 25 && q.bbox[3] - q.bbox[1] < 14);
+  for (const v of glyphs.filter(q => (q.cls === "v1" || q.cls === "v2") && above(q))) {
+    let br = wide.find(w => w.bbox[0] <= v.bbox[0] + 0.5 && v.bbox[0] - w.bbox[0] < 7 && w.bbox[1] <= v.bbox[1] + 1);
+    if (!br) continue;
+    let x1 = br.bbox[2];
+    for (let more = true; more;) { // 여러 조각으로 이어진 꺾쇠
+      more = false;
+      const nx = wide.find(w => w !== br && Math.abs(w.bbox[0] - x1) < 3 && Math.abs(w.bbox[1] - br.bbox[1]) < 2);
+      if (nx) { x1 = nx.bbox[2]; br = nx; more = true; }
+    }
+    const num = v.cls === "v1" ? 1 : 2;
+    for (let i = measureAt(v.bbox[0] + 1); i < n && edges[i] < x1 - 5; i++) marks[i].volta = num;
+  }
+  // 세뇨 / 코다: 보표 위
+  for (const q of glyphs.filter(q => q.cls === "segno" && above(q))) marks[measureAt(q.x)].segno = true;
+  for (const q of glyphs.filter(q => q.cls === "coda" && above(q))) {
+    const i = measureAt((q.bbox[0] + q.bbox[2]) / 2);
+    const rel = ((q.bbox[0] + q.bbox[2]) / 2 - edges[i]) / (edges[i + 1] - edges[i]);
+    if (rel > 0.6) marks[i].toCoda = true; else marks[i].coda = true;   // "to ⊕"는 마디 끝, "⊕ Coda"는 마디 처음
+  }
+  // D.S.: 'D' 바로 뒤 'S' (단 아래쪽에 적힘)
+  for (const d of glyphs.filter(q => q.cls === "text_D" && q.y > top - 30 && q.y < bottom + 30)) {
+    const s = glyphs.find(q => q.cls === "text_S" && q.bbox[0] > d.bbox[2] - 0.5 && q.bbox[0] - d.bbox[2] < 6 && Math.abs(q.bbox[3] - d.bbox[3]) < 1);
+    if (s) marks[measureAt(Math.min(d.x, edges[n] - 2))].ds = true;
+  }
+  return marks;
 }
