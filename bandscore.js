@@ -174,7 +174,8 @@ function beamsOf(page) {
   // 짧은 빔 조각(점8분+16분의 16분 꼬리 빔)도 포함하도록 폭 1.2pt부터
   const out = page.rects.filter(r => !isWhite(r.fill) && r.y1 - r.y0 >= 0.9 && r.y1 - r.y0 <= 2.4 && r.x1 - r.x0 > 1.2)
     .map(r => ({ x0: r.x0, x1: r.x1, y0: r.y0, y1: r.y1 }));
-  for (const p of page.polys) if (!isWhite(p.fill) && !p.curved && p.pts.length >= 4 && p.bbox[2] - p.bbox[0] > 2 && p.bbox[3] - p.bbox[1] < 12)
+  // 빔은 평행사변형(점 4~6개). 하모닉스 마름모 테두리(점이 많은 다각형)는 빔이 아니다
+  for (const p of page.polys) if (!isWhite(p.fill) && !p.curved && p.pts.length >= 4 && p.pts.length <= 6 && p.bbox[2] - p.bbox[0] > 2 && p.bbox[3] - p.bbox[1] < 12)
     out.push({ x0: p.bbox[0], x1: p.bbox[2], y0: p.bbox[1], y1: p.bbox[3], poly: p });
   // 기울어진 빔은 기호처럼 "이동 + 평행사변형"으로 그려지기도 한다
   for (const g of page.glyphs) {
@@ -207,7 +208,7 @@ function beamCount(stem, beams, tipY) {
  * TAB 보표 한 줄을 마디별 사건 목록으로
  * 사건: { x, dur(1,2,4,8,16,32), dots, notes:[{string, fret, dead, tie}], rest, tuplet, repeatPrev }
  */
-export function parseTabStaff(page, staff, glyphs, verts, beams, bars, fulls = []) {
+export function parseTabStaff(page, staff, glyphs, verts, beams, bars, fulls = [], graceXs = []) {
   const g = staff.gap, lines = staff.lines;
   const barXs = bars.map(b => b.x);
   const mine = glyphs.filter(q => q.cls && inBand(q, staff, g * 2.5, g * 2.5));
@@ -303,6 +304,18 @@ export function parseTabStaff(page, staff, glyphs, verts, beams, bars, fulls = [
     for (const s of stems) { const d = Math.abs(f.x - s.x); if (d < bd) { bd = d; best = s; } }
     if (best) owner.set(f, best);
   }
+  // 하모닉스 마름모 안 숫자는 화음이 좌우로 엇갈려 찍혀 기둥에서 조금 더 멀다
+  const diamonds = page.polys.filter(p => !p.curved && !isWhite(p.fill) && p.pts.length > 8 &&
+    Math.abs((p.bbox[2] - p.bbox[0]) - (p.bbox[3] - p.bbox[1])) < 1.5 && p.bbox[3] - p.bbox[1] > g * 1.8 && p.bbox[3] - p.bbox[1] < g * 3.5 &&
+    p.bbox[1] > staff.top - g * 2 && p.bbox[3] < staff.bottom + g * 2 && p.bbox[0] > staff.x0 && p.bbox[2] < staff.x1);
+  for (const f of frets) {
+    if (!diamonds.some(d => f.x > d.bbox[0] && f.x < d.bbox[2] && lines[f.string - 1] > d.bbox[1] && lines[f.string - 1] < d.bbox[3])) continue;
+    f.harmonic = true; // 마름모 = 자연 하모닉스
+    if (owner.has(f)) continue;
+    let best = null, bd = 6.5;
+    for (const s of stems) { const d = Math.abs(f.x - s.x); if (d < bd) { bd = d; best = s; } }
+    if (best) owner.set(f, best);
+  }
   // 동그라미(긴 음) 안의 화음 숫자는 지그재그로 찍히므로, 하나가 기둥에 붙으면 같은 동그라미 안 숫자도 함께
   const inCircle = (f, c) => f.x >= c.bbox[0] - 0.5 && f.x <= c.bbox[2] + 0.5 &&
     lines[f.string - 1] >= c.bbox[1] - 0.5 && lines[f.string - 1] <= c.bbox[3] + 0.5;
@@ -315,7 +328,10 @@ export function parseTabStaff(page, staff, glyphs, verts, beams, bars, fulls = [
   const graceSlashes = mine.filter(q => q.cls === "slash" && q.bbox[2] - q.bbox[0] > (q.bbox[3] - q.bbox[1]) * 1.5);
   for (const s of stems) {
     const tip = s.side === "above" ? s.y0 : s.y1;
-    if (graceSlashes.some(q => q.bbox[0] < s.x && q.bbox[2] > s.x && q.bbox[3] > s.y0 - 1 && q.bbox[1] < s.y1 + 1)) {
+    // 꾸밈음: 사선이 기둥을 가로지르거나, 같은 파트 오선보의 같은 위치에 작은 머리가 있음
+    const isGrace = graceSlashes.some(q => q.bbox[0] < s.x && q.bbox[2] > s.x && q.bbox[3] > s.y0 - 1 && q.bbox[1] < s.y1 + 1) ||
+      frets.some(f => owner.get(f) === s && graceXs.some(x => Math.abs(x - f.x) < 2));
+    if (isGrace) {
       frets.filter(f => owner.get(f) === s).forEach(f => usedFrets.add(f));
       continue;
     }
@@ -328,7 +344,7 @@ export function parseTabStaff(page, staff, glyphs, verts, beams, bars, fulls = [
     const circled = col.some(f => circles.some(c => f.x >= c.bbox[0] && f.x <= c.bbox[2]));
     const dur = n > 0 ? 4 * 2 ** n : circled ? 2 : 4;
     const x1 = Math.max(s.x, ...col.map(f => f.x1));
-    events.push({ x: s.x, x1, dur, dots: 0, notes: col.map(f => ({ string: f.string, fret: f.fret, dead: f.dead, tie: !!f.tie })), stem: s });
+    events.push({ x: s.x, x1, dur, dots: 0, notes: col.map(f => ({ string: f.string, fret: f.fret, dead: f.dead, tie: !!f.tie, harmonic: !!f.harmonic })), stem: s });
   }
   // 기둥 없는 숫자 = 온음표(동그라미)
   const loose = frets.filter(f => !usedFrets.has(f));
@@ -399,6 +415,16 @@ export function parseTabStaff(page, staff, glyphs, verts, beams, bars, fulls = [
   measures.forEach((m, i) => fixOverfull(m, bigParens, fulls[i] ?? 1));
   measures.forEach((m, i) => fillAmbiguous(m, edges[i + 1], fulls[i] ?? 1));
   return measures;
+}
+
+/** 오선보의 작은 음표머리(꾸밈음) 가로 위치. 작은 X 머리는 보통 X 머리와 모양이 같고 크기만 작아 분류되지 않는다 */
+function smallHeadXs(staff, glyphs) {
+  const g = staff.gap;
+  return glyphs.filter(q => {
+    const cy = (q.bbox[1] + q.bbox[3]) / 2, w = q.bbox[2] - q.bbox[0];
+    if (q.x < staff.x0 || q.x > staff.x1 || cy < staff.top - g * 3 || cy > staff.bottom + g * 3) return false;
+    return q.cls === "head_small" || (!q.cls && w < 2.1 && w > 1 && q.segs.map(z => z.op).join("") === "011111111111");
+  }).map(q => (q.bbox[0] + q.bbox[2]) / 2);
 }
 
 /**
@@ -998,7 +1024,7 @@ function parseSystems(list) {
       const rdots = markRepeatDots(sys, pg.glyphs, verts);
       const nav = navigationMarks(sys, pg.glyphs, edges, rdots);
       const parsed = layout.map(p => {
-        if (p.kind === "guitar" || p.kind === "bass") return parseTabStaff(pg, sys.staves[p.tab], pg.glyphs, verts, beams, sb, fulls);
+        if (p.kind === "guitar" || p.kind === "bass") return parseTabStaff(pg, sys.staves[p.tab], pg.glyphs, verts, beams, sb, fulls, p.std != null ? smallHeadXs(sys.staves[p.std], pg.glyphs) : []);
         if (p.kind === "piano") {
           const up = parseStdStaff(pg, sys.staves[p.std], pg.glyphs, verts, beams, sb, { others: sys.staves, fulls });
           const lo = parseStdStaff(pg, sys.staves[p.lower], pg.glyphs, verts, beams, sb, { others: sys.staves, fulls });
@@ -1148,7 +1174,7 @@ function beatTex(e, kind, strings = 6, perc = false) {
   let body;
   if (e.rest || !e.notes.length) body = "r";
   else if (kind === "tab") {
-    const ns = [...new Set(e.notes.map(n => `${n.dead ? "x" : n.fret}.${n.string}${n.tie ? "{t}" : ""}`))];
+    const ns = [...new Set(e.notes.map(n => `${n.dead ? "x" : n.fret}.${n.string}${n.tie || n.harmonic ? `{${[n.tie && "t", n.harmonic && "nh"].filter(Boolean).join(" ")}}` : ""}`))];
     body = ns.length > 1 ? `(${ns.join(" ")})` : ns[0];
   } else if (kind === "drums") {
     const ns = [...new Set(e.notes.map(n => perc ? (n.ring ? "CrashMediumHit" : n.xhead ? "CabasaHit" : "TambourineHit") : drumArticulation(n.pos, n.xhead)))];
