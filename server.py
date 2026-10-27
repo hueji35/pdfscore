@@ -2,7 +2,8 @@
 
 웹 호스팅 없이 집 PC에서 바로 쓰고 싶을 때 실행합니다. 같은 Wi-Fi의 폰/태블릿에서도 접속할 수 있습니다.
 악보 인식은 브라우저 안에서 이루어지므로, 이 서버는 파일만 제공합니다.
-멀티스레드 인식이 가능하도록 cross-origin isolation 헤더(COOP/COEP)를 붙입니다.
+GitHub Pages와 똑같이 동작하도록 cross-origin isolation 헤더는 붙이지 않습니다.
+(붙이면 인식 엔진이 멀티스레드 모드로 바뀌는데, 이 모드는 현재 멈추는 문제가 있습니다.)
 
 사용법:  python server.py [--port 8000] [--no-browser]
 Python 표준 라이브러리만 사용합니다.
@@ -46,14 +47,12 @@ class Handler(SimpleHTTPRequestHandler):
                       ".musicxml": "application/vnd.recordare.musicxml+xml"}
 
     def log_message(self, fmt, *args):
-        pass
+        if os.environ.get("PDFSCORE_LOG"):
+            super().log_message(fmt, *args)
 
     def end_headers(self):
         # 모델(.onnx)은 오래 캐시, 앱 파일은 항상 새로 확인
         self.send_header("Cache-Control", "public, max-age=31536000, immutable" if self.path.endswith(".onnx") else "no-cache")
-        self.send_header("Cross-Origin-Opener-Policy", "same-origin")
-        self.send_header("Cross-Origin-Embedder-Policy", "require-corp")
-        self.send_header("Cross-Origin-Resource-Policy", "same-origin")
         super().end_headers()
 
     def do_GET(self):

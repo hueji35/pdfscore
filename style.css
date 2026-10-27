@@ -70,6 +70,15 @@ body {
 }
 .seekbar input { flex: 1; accent-color: var(--accent); height: 24px; }
 
+.omr-bar {
+  display: flex; align-items: center; gap: 10px; padding: 6px 12px;
+  background: #fff7e0; color: #5c4400; border-bottom: 1px solid #f0d890; font-size: 13px;
+}
+.omr-bar[hidden] { display: none; }
+.omr-bar span { flex: 1; min-width: 0; }
+.omr-bar .btn { color: inherit; border-color: #e0c060; background: transparent; }
+.spinner.small { width: 16px; height: 16px; border-width: 2px; }
+
 /* ---------- layout ---------- */
 main { flex: 1; display: flex; min-height: 0; position: relative; }
 .parts {

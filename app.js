@@ -46,7 +46,7 @@
     seek: $("seek"), timeCur: $("timeCur"), timeTotal: $("timeTotal"),
     wrap: $("scoreWrap"), score: $("score"), welcome: $("welcome"),
     overlay: $("overlay"), overlayMsg: $("overlayMsg"), toast: $("toast"), dropHint: $("dropHint"),
-    dialog: $("msgDialog"), cancel: $("cancelBtn"), save: $("saveBtn"), msgTitle: $("msgTitle"), msgBody: $("msgBody"),
+    dialog: $("msgDialog"), cancel: $("cancelBtn"), save: $("saveBtn"), omrBar: $("omrBar"), omrBarMsg: $("omrBarMsg"), omrBarCancel: $("omrBarCancel"), msgTitle: $("msgTitle"), msgBody: $("msgBody"),
   };
 
   const osmd = new opensheetmusicdisplay.OpenSheetMusicDisplay(ui.score, {
@@ -105,6 +105,7 @@
 
   async function openFile(file) {
     if (!file) return;
+    if (omrRunning && omrAbort) omrAbort.abort();
     stop();
     try {
       if (OMR_EXT.test(file.name)) {
@@ -114,7 +115,7 @@
         await loadScore(await readBinaryString(file), file.name);
       } else {
         showOverlay("악보 여는 중…");
-        await loadScore(await file.text(), file.name);
+        await loadScoreSafe(await file.text(), file.name);
       }
     } catch (err) {
       console.error(err);
@@ -145,28 +146,34 @@
 
   /* ------------------------------------- PDF/이미지 악보 인식 (브라우저 안에서) */
   // homr-web: 악보 인식 모델을 onnxruntime-web(WebGPU 또는 WebAssembly)으로 이 기기에서 직접 실행한다.
-  // WebGPU나 멀티스레드가 기기에 따라 멈추는 경우가 있어, 멈추면 단일 스레드(wasm)로 바꾸고 기억해 둔다
-  const BACKEND_KEY = "pdfscore.omrBackend";
-  let recognizerPromise = null;
-  function getRecognizer() {
-    if (!recognizerPromise) {
-      let prefer;
-      try { prefer = localStorage.getItem(BACKEND_KEY) || undefined; } catch { /* 저장소 사용 불가 */ }
-      recognizerPromise = import("./lib/omr/omr.js")
-        .then(m => m.createRecognizer({ baseUrl: "models/", wasmPaths: "lib/omr/ort/", prefer }))
-        .catch(err => { recognizerPromise = null; throw err; });
-    }
-    return recognizerPromise;
+  // WebGPU가 기기에 따라 멈추는 경우가 있어, 멈추면 호환 모드(wasm)로 바꾸고 기억해 둔다
+  const BACKEND_KEY = "pdfscore.omrBackend.v2";
+  const BACKEND_KO = { webgpu: "WebGPU (빠름)", "wasm-threads": "멀티스레드", wasm: "호환 모드 (느림)" };
+  let engines = [];   // 만들어 둔 인식 엔진(Worker) 목록. 한 엔진은 한 번에 한 페이지만 읽는다
+  function preferredBackend() {
+    try { return localStorage.getItem(BACKEND_KEY) || undefined; } catch { return undefined; }
   }
-  async function downgradeRecognizer(rec) {
-    try { localStorage.setItem(BACKEND_KEY, "wasm"); } catch { /* 저장소 사용 불가 */ }
-    recognizerPromise = null;
-    try { await rec.dispose(); } catch { /* 이미 멈춤 */ }
-    return getRecognizer();
+  async function createEngine() {
+    const m = await import("./lib/omr/omr.js");
+    return m.createRecognizer({ baseUrl: "models/", wasmPaths: "lib/omr/ort/", prefer: preferredBackend() });
+  }
+  async function getEngines(n) {
+    while (engines.length < n) engines.push(createEngine().catch(err => { engines = []; throw err; }));
+    return Promise.all(engines.slice(0, n));
+  }
+  async function resetEngines(downgrade) {
+    if (downgrade) try { localStorage.setItem(BACKEND_KEY, "wasm"); } catch { /* 저장소 사용 불가 */ }
+    const old = engines; engines = [];
+    for (const p of old) p.then(r => r.dispose()).catch(() => {});
+  }
+  // 여러 페이지는 PC에서 엔진 두 개로 동시에 읽는다 (폰은 메모리 때문에 하나)
+  function engineCount(pages) {
+    const mobile = matchMedia("(pointer: coarse)").matches || (navigator.deviceMemory && navigator.deviceMemory < 8);
+    return pages > 1 && !mobile ? 2 : 1;
   }
 
   const STAGE_KO = { segment: "악보 구조 분석", detect: "오선 찾기", dewarp: "기울기 보정", staff: "오선별 음표 읽기",
-    ocr: "글자 읽기", xml: "MusicXML 만들기", tab: "타브 확인" };
+    ocr: "글자 읽기", xml: "MusicXML 만들기", tab: "타브 확인", models: "모델 준비" };
 
   // PDF는 페이지마다 이미지(약 300dpi 상당, 긴 변 최대 3000px)로 그린다
   async function pdfToImages(file, onPage) {
@@ -194,7 +201,29 @@
     return blobs;
   }
 
-  let omrAbort = null, lastRecognized = null;
+  // 한 페이지 읽기. 화면이 보이는 동안 진행 소식이 2분 넘게 없으면 멈춘 것으로 보고 "stalled"를 돌려준다
+  async function recognizeOne(engine, blob, signal, onProgress) {
+    const ctl = new AbortController();
+    const onCancel = () => ctl.abort();
+    signal.addEventListener("abort", onCancel);
+    let quiet = 0, last = performance.now(), stalled = false;
+    const watchdog = engine.backend === "wasm" ? 0 : setInterval(() => {
+      const now = performance.now();
+      if (document.visibilityState === "visible") quiet += now - last; // 다른 탭에 가 있는 동안은 세지 않음
+      last = now;
+      if (quiet > 120000) { stalled = true; ctl.abort(); }
+    }, 1000);
+    const res = await engine.recognizePage(blob, {
+      ocr: false, // 제목·코드 글자 인식은 생략 (모델 32MB 절약)
+      signal: ctl.signal,
+      onProgress: p => { quiet = 0; onProgress(p); },
+    });
+    clearInterval(watchdog);
+    signal.removeEventListener("abort", onCancel);
+    return stalled && !signal.aborted ? { ok: false, error: "stalled" } : res;
+  }
+
+  let omrAbort = null, lastRecognized = null, omrRunning = false;
   async function openViaOmr(file) {
     if (location.protocol === "file:") {
       alertBox("PDF/이미지 인식은 웹 주소로 열어야 합니다", `
@@ -203,74 +232,158 @@
         MusicXML(.mxl/.musicxml) 파일은 지금도 바로 열 수 있습니다.</p>`);
       return;
     }
+    if (omrRunning) { toast("이전 악보를 아직 인식하고 있습니다. 취소한 뒤 다시 열어 주세요."); return; }
+    omrRunning = true;
     omrAbort = new AbortController();
-    const signal = omrAbort.signal;
-    showOverlay("악보 인식 엔진 준비 중…", true);
-    let recognizer;
-    try {
-      recognizer = await getRecognizer();
-    } catch (err) {
-      throw new Error("이 브라우저에서는 악보 인식 엔진을 시작할 수 없습니다. 최신 Chrome, Edge, Safari를 사용해 주세요.\n(" + err.message + ")");
-    }
-    console.info("OMR backend:", recognizer.backend, recognizer.backendReason, "threads:", recognizer.numThreads);
+    try { await runOmr(file, omrAbort.signal); }
+    finally { omrRunning = false; setOmrBar(null); }
+  }
 
+  async function runOmr(file, signal) {
+    const title = file.name.replace(OMR_EXT, "");
+    showOverlay("악보 인식 준비 중…", true);
     const pages = /\.pdf$/i.test(file.name)
       ? await pdfToImages(file, (i, n) => showOverlay(`PDF 페이지 그리는 중… ${i}/${n}`, true))
       : [file];
-    if (signal.aborted) return;
+    if (signal.aborted) return hideOverlay();
 
-    const xmls = [];
-    const failed = [];
-    const t0 = performance.now();
-    for (let i = 0; i < pages.length; i++) {
-      const pageLabel = pages.length > 1 ? `${i + 1}/${pages.length} 페이지 ` : "";
-      // 진행 소식이 오래 없으면(멈춤) 단일 스레드 엔진으로 바꿔 이 페이지를 다시 읽는다
-      const pageCtl = new AbortController();
-      const onCancel = () => pageCtl.abort();
-      signal.addEventListener("abort", onCancel);
-      let lastProgress = performance.now(), stalled = false;
-      const watchdog = recognizer.backend === "wasm" ? 0 : setInterval(() => {
-        if (performance.now() - lastProgress > 90000) { stalled = true; pageCtl.abort(); }
-      }, 2000);
-      const res = await recognizer.recognizePage(pages[i], {
-        ocr: false, // 제목·코드 글자 인식은 생략 (모델 32MB 절약)
-        signal: pageCtl.signal,
-        onProgress: ({ stage, done, total }) => {
-          lastProgress = performance.now();
-          if (stage === "models") {
-            const mb = x => (x / 1048576).toFixed(0);
-            showOverlay(`악보 인식 모델 내려받는 중… ${mb(done)} / ${mb(total)} MB\n(처음 한 번만 받고, 다음부터는 저장된 것을 씁니다)`, true);
-          } else {
-            const step = total > 1 ? ` (${done}/${total})` : "";
-            showOverlay(`${pageLabel}악보 인식 중 — ${STAGE_KO[stage] || stage}${step}`, true);
-          }
-        },
-      });
-      clearInterval(watchdog);
-      signal.removeEventListener("abort", onCancel);
-      if (stalled && !signal.aborted) {
-        console.warn("OMR stalled on", recognizer.backend, "→ wasm");
-        showOverlay("이 기기에서 빠른 엔진이 응답하지 않아 호환 모드로 다시 인식합니다…", true);
-        recognizer = await downgradeRecognizer(recognizer);
-        i--;
-        continue;
-      }
-      if (res.ok) xmls.push(res.musicXml);
-      else if (res.error === "cancelled" || res.error === "timeout") { hideOverlay(); toast("악보 인식을 취소했습니다."); return; }
-      else { failed.push(i + 1); console.warn("OMR page failed", i + 1, res.error, res.log); }
-      if (res.error === "engine_missing") throw new Error("악보 인식 모델을 내려받지 못했습니다. 인터넷 연결을 확인해 주세요.");
-      if (res.error === "worker_lost") { recognizerPromise = null; throw new Error("인식 중 메모리가 부족해 엔진이 멈췄습니다. 페이지 수를 줄이거나 PC에서 시도해 주세요."); }
+    let pool;
+    try {
+      pool = await getEngines(engineCount(pages.length));
+    } catch (err) {
+      throw new Error("이 브라우저에서는 악보 인식 엔진을 시작할 수 없습니다. 최신 Chrome, Edge, Safari를 사용해 주세요.\n(" + err.message + ")");
     }
-    console.info(`OMR ${pages.length} page(s) in ${((performance.now() - t0) / 1000).toFixed(1)}s`);
-    if (!xmls.length) throw new Error("악보를 찾지 못했습니다. 오선이 선명하게 보이는 인쇄 악보 이미지인지 확인해 주세요.");
+    let backend = pool[0].backend;
+    console.info("OMR backend:", backend, pool[0].backendReason, "engines:", pool.length);
 
-    showOverlay("인식된 악보 그리는 중…");
-    const xml = mergeMusicXml(xmls, file.name.replace(OMR_EXT, ""));
-    await loadScore(xml, file.name.replace(OMR_EXT, ".musicxml"));
-    lastRecognized = { name: file.name.replace(OMR_EXT, ".musicxml"), xml };
-    ui.save.hidden = false;
+    const t0 = performance.now();
+    const results = new Array(pages.length);   // 페이지별 MusicXML, 실패하면 null
+    const stage = new Array(pages.length).fill("대기");
+    let shownUpTo = 0, nextPage = 0, fatal = null, downloading = null;
+    const elapsed = () => Math.round((performance.now() - t0) / 1000);
+    const status = () => {
+      const done = results.filter(r => r !== undefined).length;
+      const head = pages.length > 1 ? `${done}/${pages.length} 페이지 완료 · ` : "";
+      const now = stage.map((s, i) => [s, i]).filter(([s]) => s !== "대기" && s !== "완료")
+        .map(([s, i]) => (pages.length > 1 ? `${i + 1}쪽 ` : "") + s).join(", ");
+      return `악보 인식 중 — ${head}${now || "정리 중"}\n엔진: ${BACKEND_KO[backend] || backend} · ${elapsed()}초 경과`;
+    };
+    const report = () => {
+      const msg = downloading || status();
+      if (shownUpTo === 0) showOverlay(msg, true); else setOmrBar(msg);
+    };
+    const ticker = setInterval(report, 1000);
+
+    // 앞에서부터 연속으로 끝난 페이지까지 화면에 보여 준다 (첫 페이지가 끝나면 바로 볼 수 있게)
+    const showReady = async final => {
+      let k = 0;
+      while (k < pages.length && results[k] !== undefined) k++;
+      const ready = results.slice(0, k).filter(Boolean);
+      if (!ready.length || (k === shownUpTo && !final)) return;
+      if (state.playing && shownUpTo > 0 && !final) return; // 재생 중에는 끊지 않고 나중에 반영
+      const xml = mergeMusicXml(ready, title);
+      const keep = shownUpTo > 0 ? state.parts.map(p => ({ visible: p.visible, audible: p.audible, volume: p.volume, program: p.program })) : null;
+      const pos = state.posSec;
+      await loadScoreSafe(xml, title + ".musicxml");
+      if (keep && keep.length === state.parts.length) restorePartSettings(keep, pos);
+      shownUpTo = k;
+      lastRecognized = { name: title + ".musicxml", xml };
+      ui.save.hidden = false;
+      if (k < pages.length) { hideOverlay(); report(); }
+    };
+
+    const worker = async engine => {
+      while (!fatal && !signal.aborted && nextPage < pages.length) {
+        const i = nextPage++;
+        if (results[i] !== undefined) continue;
+        stage[i] = "시작";
+        const res = await recognizeOne(engine, pages[i], signal, ({ stage: s, done, total }) => {
+          if (s === "models") {
+            const mb = x => (x / 1048576).toFixed(0);
+            downloading = done >= total ? null
+              : `악보 인식 모델 내려받는 중… ${mb(done)} / ${mb(total)} MB\n(처음 한 번만 받고, 다음부터는 저장된 것을 씁니다)`;
+          } else {
+            downloading = null;
+            stage[i] = (STAGE_KO[s] || s) + (total > 1 ? ` ${done}/${total}` : "");
+          }
+          report();
+        });
+        if (res.ok) results[i] = res.musicXml;
+        else if (res.error === "cancelled" || res.error === "timeout") { stage[i] = "대기"; return; }
+        else if (res.error === "stalled" || res.error === "engine_missing" || res.error === "worker_lost") {
+          fatal = fatal || res.error; stage[i] = "대기";
+          return;
+        } else { results[i] = null; console.warn("OMR page failed", i + 1, res.error, res.log); }
+        stage[i] = "완료";
+        await showReady(false);
+      }
+    };
+
+    try {
+      await Promise.all(pool.map(worker));
+      if (fatal === "stalled" && !signal.aborted) {
+        // 빠른 엔진이 멈춤 → 호환 모드로 남은 페이지를 이어서 읽는다
+        console.warn("OMR stalled on", backend, "→ wasm");
+        await resetEngines(true);
+        toast("이 기기에서 빠른 엔진이 응답하지 않아 호환 모드로 이어서 인식합니다.", 5000);
+        pool = await getEngines(1);
+        backend = pool[0].backend;
+        fatal = null;
+        nextPage = 0;
+        await worker(pool[0]);
+      }
+    } finally {
+      clearInterval(ticker);
+    }
+    if (signal.aborted) { hideOverlay(); toast("악보 인식을 취소했습니다."); return; }
+    if (fatal === "engine_missing") throw new Error("악보 인식 모델을 내려받지 못했습니다. 인터넷 연결을 확인해 주세요.");
+    if (fatal === "worker_lost") { await resetEngines(false); throw new Error("인식 중 메모리가 부족해 엔진이 멈췄습니다. 페이지 수를 줄이거나 PC에서 시도해 주세요."); }
+    console.info(`OMR ${pages.length} page(s) in ${elapsed()}s`);
+    if (!results.some(Boolean)) { hideOverlay(); throw new Error("악보를 찾지 못했습니다. 오선이 선명하게 보이는 인쇄 악보 이미지인지 확인해 주세요."); }
+
+    // 마지막 반영: 재생 중이면 멈출 때까지 기다렸다가 전체 악보로 바꾼다
+    if (shownUpTo < pages.length) {
+      if (state.playing) setOmrBar("인식 완료 — 재생을 멈추면 나머지 페이지를 붙입니다");
+      while (state.playing && !signal.aborted) await new Promise(r => setTimeout(r, 500));
+      showOverlay("인식된 악보 그리는 중…");
+      await showReady(true);
+    }
+    hideOverlay();
+    const failed = results.map((r, i) => (r ? 0 : i + 1)).filter(Boolean);
     if (failed.length) toast(`${failed.join(", ")} 페이지는 악보로 인식하지 못해 건너뛰었습니다.`, 6000);
-    else toast("인식 완료. 틀린 음이 있을 수 있습니다. 💾 버튼으로 MusicXML을 저장해 두면 다음엔 바로 열립니다.", 6000);
+    else toast(`인식 완료 (${elapsed()}초). 틀린 음이 있을 수 있습니다. 💾 버튼으로 저장해 두면 다음엔 바로 열립니다.`, 6000);
+  }
+
+  function restorePartSettings(keep, pos) {
+    keep.forEach((k, i) => {
+      const p = state.parts[i];
+      if (p.program !== k.program) { p.program = k.program; p.li.querySelector("select").value = k.program; loadPartSound(p); }
+      p.volume = k.volume; p.li.querySelector("input[type=range]").value = k.volume;
+      applyGain(p);
+      setAudible(i, k.audible);
+      if (!k.visible) setVisible(i, false);
+    });
+    if (pos > 0) seekTo(Math.min(pos, state.totalSec));
+  }
+
+  // 첫 페이지를 보여 준 뒤 나머지를 읽는 동안 화면 위쪽에 띄우는 상태 줄
+  function setOmrBar(msg) {
+    ui.omrBar.hidden = !msg;
+    if (msg) ui.omrBarMsg.textContent = msg.replace("\n", " · ");
+  }
+
+  // 인식 결과를 그리다 오류가 나면, 문제를 일으키기 쉬운 표기(붙임줄·이음줄 등)를 지우고 한 번 더 시도한다
+  async function loadScoreSafe(xml, name) {
+    try {
+      await loadScore(xml, name);
+    } catch (err) {
+      console.warn("render failed, retrying without ties/slurs", err);
+      const doc = new DOMParser().parseFromString(xml, "application/xml");
+      sanitizeOmrXml(doc);
+      doc.querySelectorAll("tie, tied, slur, glissando, slide, tuplet, time-modification").forEach(e => e.remove());
+      await loadScore(new XMLSerializer().serializeToString(doc), name);
+      toast("그릴 수 없는 표기 일부(화음 속 쉼표, 붙임줄 등)를 고쳐서 표시했습니다.", 5000);
+    }
   }
 
   // 페이지별 MusicXML을 하나로 이어 붙인다 (파트 순서가 같다고 보고, 마디를 뒤에 덧붙임)
@@ -307,8 +420,47 @@
       }
       work.textContent = title;
     }
+    sanitizeOmrXml(base);
     if (mismatch) toast("페이지마다 인식된 파트 수가 달라 일부 파트가 어긋날 수 있습니다.", 6000);
     return new XMLSerializer().serializeToString(base);
+  }
+
+  // 인식 결과에 가끔 섞이는, 악보 그리기 라이브러리가 처리하지 못하는 표기를 고친다
+  // (화음에 끼어든 쉼표, 쉼표의 붙임줄, 짝이 없는 붙임줄 → "getHalfTone" 오류의 원인)
+  function sanitizeOmrXml(doc) {
+    for (const n of doc.querySelectorAll("note")) {
+      const isRest = !!n.querySelector("rest");
+      if (!isRest && !n.querySelector("pitch") && !n.querySelector("unpitched")) {
+        n.insertBefore(doc.createElement("rest"), n.querySelector("duration"));
+      }
+      if (n.querySelector("rest")) {
+        if (n.querySelector("chord")) { n.remove(); continue; }
+        n.querySelectorAll("tie, tied, glissando, slide").forEach(e => e.remove());
+      }
+      n.querySelectorAll("glissando, slide").forEach(e => e.remove());
+    }
+    // 붙임줄은 같은 파트·같은 음높이의 시작과 끝이 짝을 이룰 때만 남긴다
+    for (const part of doc.querySelectorAll("score-partwise > part")) {
+      const open = new Map();
+      const key = n => {
+        const p = n.querySelector("pitch");
+        return [n.querySelector("staff")?.textContent, p?.querySelector("step")?.textContent,
+          p?.querySelector("alter")?.textContent || "0", p?.querySelector("octave")?.textContent].join("|");
+      };
+      const drop = (n, type) => n.querySelectorAll(`tie[type="${type}"], tied[type="${type}"]`).forEach(e => e.remove());
+      for (const n of part.querySelectorAll("note")) {
+        if (!n.querySelector("pitch")) continue;
+        const k = key(n);
+        if (n.querySelector('tie[type="stop"]')) {
+          if (open.has(k)) open.delete(k); else drop(n, "stop");
+        }
+        if (n.querySelector('tie[type="start"]')) {
+          if (open.has(k)) drop(open.get(k), "start");
+          open.set(k, n);
+        }
+      }
+      for (const n of open.values()) drop(n, "start");
+    }
   }
 
   /* ---------------------------------------------------------- 악보 로드 */
@@ -902,7 +1054,7 @@
   });
 
   /* ------------------------------------------------------- UI 이벤트 */
-  ui.cancel.onclick = () => { if (omrAbort) omrAbort.abort(); };
+  ui.cancel.onclick = ui.omrBarCancel.onclick = () => { if (omrAbort) omrAbort.abort(); };
   ui.save.onclick = () => {
     if (!lastRecognized) return;
     const a = document.createElement("a");
@@ -986,5 +1138,5 @@
   ui.zoomVal.textContent = Math.round(state.zoom * 100) + "%";
 
   // 디버그/검증용
-  window.pdfscore = { osmd, state };
+  window.pdfscore = { osmd, state, mergeMusicXml, loadScoreSafe };
 })();
