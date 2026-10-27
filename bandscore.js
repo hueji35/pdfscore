@@ -761,7 +761,10 @@ export function parseStdStaff(page, staff, glyphs, verts, beams, bars, opts = {}
   for (const q of near) {
     const d = { rest4: 4, rest8: 8, rest16: 16 }[q.cls];
     const cy = (q.bbox[1] + q.bbox[3]) / 2;
-    if (d && cy > staff.top - g && cy < staff.bottom + g)
+    // 높은 음 빔 묶음 사이의 쉼표는 오선 위로 올라가 찍힌다 — 오선 밖으로 1칸 넘게 벗어난 쉼표는 빔 묶음 사이에 있을 때만
+    const inBeams = beams.some(b => b.x0 < q.bbox[0] && b.x1 > q.bbox[2] && b.y0 > staff.top - g * 6 && b.y1 < staff.bottom + g * 6);
+    const reach = inBeams ? 3 : 1;
+    if (d && cy > staff.top - g * reach && cy < staff.bottom + g * reach && ownerOf(cy) === staff)
       events.push({ x: q.bbox[0], x1: q.bbox[2], cy, dur: d, dots: 0, rest: true, notes: [], voice: cy < (staff.top + staff.bottom) / 2 - g ? 1 : cy > (staff.top + staff.bottom) / 2 + g ? 2 : 0 });
   }
   for (const r of rectRests(page, staff, verts)) events.push({ ...r, x1: r.x + 2 });
