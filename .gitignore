@@ -1,2 +1,14 @@
 __pycache__/
 *.pyc
+
+# 사용자 악보 파일 (저작권, 업로드 금지)
+*.pdf
+*.PDF
+*.gp
+*.gpx
+*.gp3
+*.gp4
+*.gp5
+*.mxl
+*.musicxml
+/scores/

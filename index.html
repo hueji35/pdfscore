@@ -14,7 +14,7 @@
     <label class="btn primary" title="MusicXML(.musicxml/.xml/.mxl), PDF, 이미지 열기">
       📂 <span class="lbl">열기</span>
       <input id="fileInput" type="file" hidden
-        accept=".musicxml,.xml,.mxl,.pdf,.png,.jpg,.jpeg,.tif,.tiff,.bmp,application/pdf,image/*">
+        accept=".musicxml,.xml,.mxl,.gp,.gpx,.gp3,.gp4,.gp5,.gp7,.pdf,.png,.jpg,.jpeg,.tif,.tiff,.bmp,application/pdf,image/*">
     </label>
     <button id="saveBtn" class="btn" title="인식된 악보를 MusicXML로 저장" hidden>💾 <span class="lbl">저장</span></button>
   </div>
@@ -67,6 +67,7 @@
       <p>악보 파일을 여기에 끌어다 놓거나 <b>📂 열기</b>를 누르세요.</p>
       <ul>
         <li><b>MusicXML / MXL</b> — 바로 열립니다 (MuseScore, Finale, Sibelius, Dorico 등에서 내보내기).</li>
+        <li><b>Guitar Pro (.gp / .gpx / .gp3~5)</b> — TAB·드럼까지 그대로 열립니다.</li>
         <li><b>PDF / 이미지(PNG·JPG)</b> — 이 기기 안에서 악보를 인식(OMR)해 변환합니다. 처음 한 번 인식 모델(약 130~190MB)을 내려받습니다.</li>
       </ul>
     </div>
@@ -95,6 +96,7 @@
 
 <script src="lib/opensheetmusicdisplay.min.js"></script>
 <script src="lib/soundfont-player.min.js"></script>
+<script src="tabmode.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

@@ -102,13 +102,50 @@
 
   /* ------------------------------------------------------------- 파일 열기 */
   const OMR_EXT = /\.(pdf|png|jpe?g|tiff?|bmp)$/i;
+  const GP_EXT = /\.(gp|gpx|gp3|gp4|gp5|gp7)$/i;
+  let fileName = "";
+
+  // alphaTab(1MB)은 밴드 악보를 열 때만 불러온다
+  let alphaTabLoading = null;
+  function loadAlphaTab() {
+    if (window.alphaTab) return Promise.resolve();
+    if (!alphaTabLoading) {
+      alphaTabLoading = new Promise((res, rej) => {
+        const sc = document.createElement("script");
+        sc.src = "lib/alphatab/alphaTab.min.js";
+        sc.onload = res;
+        sc.onerror = () => { alphaTabLoading = null; rej(new Error("alphaTab을 불러오지 못했습니다.")); };
+        document.head.appendChild(sc);
+      });
+    }
+    return alphaTabLoading;
+  }
+  async function openTabFile(file) {
+    showOverlay("밴드 악보 여는 중…");
+    await loadAlphaTab();
+    enterTabMode();
+    tab.loadFile(new Uint8Array(await file.arrayBuffer()));
+  }
+  function enterTabMode() {
+    pause();
+    state.loaded = false;
+    ui.save.hidden = true;
+    ui.welcome.hidden = true;
+    document.body.classList.add("has-score");
+    if (window.innerWidth <= 760) document.body.classList.add("parts-hidden");
+    [ui.play, ui.stop, ui.rewind, ui.seek].forEach(el => (el.disabled = false));
+  }
 
   async function openFile(file) {
     if (!file) return;
     if (omrRunning && omrAbort) omrAbort.abort();
     stop();
+    if (tab.active) tab.stop();
+    fileName = file.name;
     try {
-      if (OMR_EXT.test(file.name)) {
+      if (GP_EXT.test(file.name)) {
+        await openTabFile(file);
+      } else if (OMR_EXT.test(file.name)) {
         await openViaOmr(file);
       } else if (/\.mxl$/i.test(file.name)) {
         showOverlay("악보 여는 중…");
@@ -638,6 +675,7 @@
     lastRecognized = null;
     showOverlay("악보 해석 중…");
     await nextFrame();
+    if (tab.active) tab.deactivate();
     await osmd.load(content);
     document.title = (osmd.Sheet.TitleString || name || "악보") + " — PDFScore";
     ui.welcome.hidden = true;
@@ -904,6 +942,7 @@
 
   document.querySelector(".parts-all").addEventListener("click", e => {
     const kind = e.target.dataset.all;
+    if (kind && tab.active) return tab.toggleAll(kind);
     if (!kind || !state.loaded) return;
     if (kind === "show") {
       const allOn = state.parts.every(p => p.visible);
@@ -1222,6 +1261,21 @@
     }
   });
 
+  /* ------------------------------------------------ 밴드 악보 모드 연결 */
+  let tabTotal = 0;
+  const tab = window.createTabMode({
+    ui, toast, escapeHtml, hideOverlay,
+    fileName: () => fileName,
+    alert: (title, msg) => alertBox(title, `<p>${escapeHtml(msg)}</p>`),
+    status: msg => setOmrBar(msg),
+    time: (cur, total) => {
+      tabTotal = total;
+      ui.timeCur.textContent = fmtTime(cur);
+      ui.timeTotal.textContent = fmtTime(total);
+      if (!state.seeking && total) ui.seek.value = Math.round((cur / total) * 1000);
+    },
+  });
+
   /* ------------------------------------------------------- UI 이벤트 */
   ui.cancel.onclick = ui.omrBarCancel.onclick = () => { if (omrAbort) omrAbort.abort(); };
   ui.save.onclick = () => {
@@ -1237,14 +1291,16 @@
   ui.file.parentElement.addEventListener("click", () => warmUpEngine());
   window.addEventListener("dragenter", () => warmUpEngine());
   ui.file.onchange = () => { openFile(ui.file.files[0]); ui.file.value = ""; };
-  ui.play.onclick = () => (state.playing ? pause() : play());
-  ui.stop.onclick = stop;
-  ui.rewind.onclick = () => seekTo(0);
+  ui.play.onclick = () => (tab.active ? tab.toggle() : state.playing ? pause() : play());
+  ui.stop.onclick = () => (tab.active ? tab.stop() : stop());
+  ui.rewind.onclick = () => (tab.active ? tab.seekRatio(0) : seekTo(0));
+  ui.autoScroll.onchange = () => tab.setAutoScroll(ui.autoScroll.checked);
 
   ui.tempo.oninput = () => {
     const pos = currentPos();
     state.rate = ui.tempo.value / 100;
     ui.tempoOut.textContent = ui.tempo.value + "%";
+    tab.setRate(state.rate);
     if (state.playing) { // 현재 위치를 기준으로 다시 맞춤
       silenceAll();
       state.startPos = pos;
@@ -1256,6 +1312,7 @@
   function setZoom(z) {
     state.zoom = Math.round(Math.max(0.4, Math.min(2.5, z)) * 10) / 10;
     ui.zoomVal.textContent = Math.round(state.zoom * 100) + "%";
+    if (tab.active) { clearTimeout(rerenderTimer); rerenderTimer = setTimeout(() => tab.setZoom(state.zoom), 150); return; }
     if (state.loaded) { clearTimeout(rerenderTimer); rerenderTimer = setTimeout(rerender, 120); }
   }
   ui.zoomIn.onclick = () => setZoom(state.zoom + 0.1);
@@ -1263,7 +1320,7 @@
 
   ui.partsBtn.onclick = () => {
     document.body.classList.toggle("parts-hidden");
-    if (window.innerWidth > 760) { clearTimeout(rerenderTimer); rerenderTimer = setTimeout(rerender, 250); }
+    if (window.innerWidth > 760 && !tab.active) { clearTimeout(rerenderTimer); rerenderTimer = setTimeout(rerender, 250); }
   };
   if (window.innerWidth <= 760) document.body.classList.add("parts-hidden");
   ui.wrap.addEventListener("pointerdown", () => {
@@ -1272,11 +1329,12 @@
 
   ui.seek.addEventListener("input", () => {
     state.seeking = true;
-    ui.timeCur.textContent = fmtTime((ui.seek.value / 1000) * state.totalSec);
+    ui.timeCur.textContent = fmtTime((ui.seek.value / 1000) * (tab.active ? tabTotal : state.totalSec));
   });
   ui.seek.addEventListener("change", () => {
     state.seeking = false;
-    seekTo((ui.seek.value / 1000) * state.totalSec);
+    if (tab.active) tab.seekRatio(ui.seek.value / 1000);
+    else seekTo((ui.seek.value / 1000) * state.totalSec);
   });
 
   document.addEventListener("keydown", e => {
@@ -1291,6 +1349,7 @@
     if (Math.abs(ui.wrap.clientWidth - lastWidth) < 30) return;
     lastWidth = ui.wrap.clientWidth;
     if (window.innerWidth <= 760) document.body.classList.add("parts-hidden");
+    if (tab.active) return; // alphaTab은 스스로 너비에 맞춰 다시 그림
     clearTimeout(rerenderTimer); rerenderTimer = setTimeout(rerender, 300);
   });
 
@@ -1307,5 +1366,5 @@
   ui.zoomVal.textContent = Math.round(state.zoom * 100) + "%";
 
   // 디버그/검증용
-  window.pdfscore = { osmd, state, mergeMusicXml, loadScoreSafe };
+  window.pdfscore = { osmd, state, mergeMusicXml, loadScoreSafe, tab, loadAlphaTab, enterTabMode };
 })();
