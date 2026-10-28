@@ -42,7 +42,7 @@
     file: $("fileInput"),
     play: $("playBtn"), stop: $("stopBtn"), rewind: $("rewindBtn"),
     tempo: $("tempo"), tempoOut: $("tempoOut"), zoomIn: $("zoomIn"), zoomOut: $("zoomOut"), zoomVal: $("zoomVal"),
-    autoScroll: $("autoScroll"), partsBtn: $("partsBtn"), partList: $("partList"),
+    autoScroll: $("autoScroll"), unroll: $("unroll"), partsBtn: $("partsBtn"), partList: $("partList"),
     seek: $("seek"), timeCur: $("timeCur"), timeTotal: $("timeTotal"),
     wrap: $("scoreWrap"), score: $("score"), welcome: $("welcome"),
     overlay: $("overlay"), overlayMsg: $("overlayMsg"), toast: $("toast"), dropHint: $("dropHint"),
@@ -723,13 +723,24 @@
   }
 
   /* ---------------------------------------------------------- 악보 로드 */
-  async function loadScore(content, name) {
-    ui.save.hidden = true;
-    lastRecognized = null;
+  /** keep: 연주 순서 보기만 바꿔 다시 열 때 이어 받을 파트 설정 */
+  async function loadScore(content, name, keep) {
+    if (!keep) {
+      ui.save.hidden = true;
+      lastRecognized = null;
+    }
     showOverlay("악보 해석 중…");
     await nextFrame();
     if (tab.active) tab.deactivate();
+    if (content.startsWith("PK")) content = (await mxlToXml(content)) || content;
+    state.source = { content, name };
     await osmd.load(content);
+    state.unrolled = false;
+    if (ui.unroll.checked && !content.startsWith("PK")) {
+      const order = measureOrder(osmd.Sheet.SourceMeasures);
+      const xml = order.some((x, i) => x !== i) && unrollXml(content, order, osmd.Sheet.SourceMeasures.length);
+      if (xml) { await osmd.load(xml); state.unrolled = true; }
+    }
     document.title = (osmd.Sheet.TitleString || name || "악보") + " — PDFScore";
     ui.welcome.hidden = true;
     document.body.classList.add("has-score");
@@ -742,6 +753,8 @@
         program, gain: null, player: null, loadingToken: 0,
       };
     });
+    if (keep && keep.length === state.parts.length)
+      state.parts.forEach((p, i) => { Object.assign(p, keep[i]); p.inst.Visible = p.visible; });
 
     showOverlay("악보 그리는 중…");
     await nextFrame();
@@ -862,6 +875,104 @@
     return order;
   }
 
+  /** 펼친 순서대로 마디를 다시 늘어놓은 MusicXML. 반복 기호는 지우고, 되돌아가는 자리에는 그때의 조표·박자·음자리표·템포를 다시 적는다 */
+  function unrollXml(xml, order, count) {
+    const doc = new DOMParser().parseFromString(xml, "application/xml");
+    const parts = [...doc.querySelectorAll("score-partwise > part")];
+    const measuresOf = p => [...p.children].filter(e => e.localName === "measure");
+    if (!parts.length || parts.some(p => measuresOf(p).length !== count)) return null;
+    const ATTR = ["divisions", "key", "time", "staves", "clef", "transpose"];
+    const NAV = /^\s*(D\.?\s*[CS]\.?|Da\s+Capo|Dal\s+Segno|Fine|To\s+Coda|Coda)\b/i;
+    const ser = new XMLSerializer();
+    const make = (tag, attrs = {}) => { const e = doc.createElementNS(doc.documentElement.namespaceURI, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); return e; };
+    const strip = m => {
+      for (const b of m.querySelectorAll("barline")) {
+        if (!b.querySelector("repeat, ending")) continue;
+        b.querySelectorAll("repeat, ending").forEach(e => e.remove());
+        const style = b.querySelector("bar-style");
+        if (style && /heavy/.test(style.textContent)) style.remove();
+        if (!b.children.length) b.remove();
+      }
+      for (const snd of m.querySelectorAll("sound"))
+        for (const a of ["dacapo", "dalsegno", "segno", "coda", "tocoda", "fine"]) snd.removeAttribute(a);
+      for (const d of m.querySelectorAll("direction")) {
+        for (const t of d.querySelectorAll("direction-type"))
+          if ([...t.children].every(c => c.localName === "segno" || c.localName === "coda" || (c.localName === "words" && NAV.test(c.textContent)))) t.remove();
+        if (d.querySelector("direction-type")) continue;
+        const snd = d.querySelector("sound");
+        if (snd && snd.attributes.length) d.replaceWith(snd); else d.remove();
+      }
+      m.querySelectorAll("sound").forEach(e => { if (!e.attributes.length && !e.children.length) e.remove(); });
+    };
+    parts.forEach((part, pi) => {
+      const ms = measuresOf(part);
+      // 각 마디가 시작할 때 적용되는 속성과 템포
+      const before = [], tempoBefore = [], cur = new Map();
+      let tempo = null;
+      ms.forEach((m, i) => {
+        before[i] = new Map(cur); tempoBefore[i] = tempo;
+        for (const a of m.querySelectorAll(":scope > attributes")) for (const c of a.children)
+          if (ATTR.includes(c.localName)) cur.set(c.localName + "#" + (c.getAttribute("number") || ""), ser.serializeToString(c));
+        for (const snd of m.querySelectorAll("sound[tempo]")) tempo = snd.getAttribute("tempo");
+      });
+      before[ms.length] = cur; tempoBefore[ms.length] = tempo;
+      const out = order.map((i, k) => {
+        const m = ms[i].cloneNode(true);
+        m.setAttribute("number", k + 1);
+        if (k > 0) m.removeAttribute("implicit");
+        strip(m);
+        const prev = order[k - 1];
+        if (k > 0 && prev !== i - 1) {
+          const now = before[i], was = before[prev + 1], att = make("attributes");
+          for (const name of ATTR) for (const [key, x] of now)
+            if (key.split("#")[0] === name && (name === "divisions" || was.get(key) !== x))
+              att.appendChild(doc.importNode(new DOMParser().parseFromString(x, "application/xml").documentElement, true));
+          const first = [...m.children].find(e => e.localName !== "print");
+          if (att.children.length) m.insertBefore(att, first || null);
+          if (pi === 0 && tempoBefore[i] && tempoBefore[i] !== tempoBefore[prev + 1] && !m.querySelector("sound[tempo]"))
+            m.insertBefore(make("sound", { tempo: tempoBefore[i] }), att.parentNode ? att.nextSibling : first || null);
+        }
+        return m;
+      });
+      ms.forEach(m => m.remove());
+      out.forEach(m => part.appendChild(m));
+    });
+    return ser.serializeToString(doc);
+  }
+
+  /** .mxl(압축된 MusicXML)에서 악보 XML을 꺼낸다 */
+  async function mxlToXml(bin) {
+    try {
+      const u8 = Uint8Array.from(bin, c => c.charCodeAt(0) & 255), dv = new DataView(u8.buffer);
+      let eocd = u8.length - 22;
+      while (eocd >= 0 && dv.getUint32(eocd, true) !== 0x06054b50) eocd--;
+      if (eocd < 0) return null;
+      const files = new Map();
+      for (let p = dv.getUint32(eocd + 16, true), k = dv.getUint16(eocd + 10, true); k > 0; k--) {
+        const nameLen = dv.getUint16(p + 28, true);
+        const name = new TextDecoder().decode(u8.subarray(p + 46, p + 46 + nameLen));
+        files.set(name, { method: dv.getUint16(p + 10, true), size: dv.getUint32(p + 20, true), local: dv.getUint32(p + 42, true) });
+        p += 46 + nameLen + dv.getUint16(p + 30, true) + dv.getUint16(p + 32, true);
+      }
+      const read = async name => {
+        const f = files.get(name);
+        if (!f) return null;
+        const start = f.local + 30 + dv.getUint16(f.local + 26, true) + dv.getUint16(f.local + 28, true);
+        const data = u8.subarray(start, start + f.size);
+        if (f.method === 0) return new TextDecoder().decode(data);
+        const stream = new Blob([data]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
+        return new Response(stream).text();
+      };
+      const container = await read("META-INF/container.xml");
+      const root = container && container.match(/full-path="([^"]+)"/)?.[1];
+      const name = root || [...files.keys()].find(n => !n.startsWith("META-INF") && /\.(xml|musicxml)$/i.test(n));
+      return name ? await read(name) : null;
+    } catch (err) {
+      console.warn("mxl", err);
+      return null;
+    }
+  }
+
   function buildTimeline() {
     const sheet = osmd.Sheet;
     const measures = sheet.SourceMeasures;
@@ -932,8 +1043,8 @@
       li.className = "part";
       li.innerHTML = `
         <div class="name" title="${escapeHtml(p.name)}">${escapeHtml(p.name)}</div>
-        <label class="toggle" title="악보에 표시"><input type="checkbox" data-k="visible" checked>👁</label>
-        <label class="toggle" title="소리"><input type="checkbox" data-k="audible" checked>🔊</label>
+        <label class="toggle" title="악보에 표시"><input type="checkbox" data-k="visible"${p.visible ? " checked" : ""}>👁</label>
+        <label class="toggle" title="소리"><input type="checkbox" data-k="audible"${p.audible ? " checked" : ""}>🔊</label>
         <div class="row2">
           <select title="재생 악기 소리"></select>
           <input type="range" min="0" max="1" step="0.05" value="${p.volume}" title="음량">
@@ -1350,6 +1461,31 @@
   ui.stop.onclick = () => (tab.active ? tab.stop() : stop());
   ui.rewind.onclick = () => (tab.active ? tab.seekRatio(0) : seekTo(0));
   ui.autoScroll.onchange = () => tab.setAutoScroll(ui.autoScroll.checked);
+
+  // 연주 순서 기호(도돌이표·괄호·D.S.·Coda)를 그대로 표시할지, 펼쳐서 표시할지
+  const UNROLL_KEY = "pdfscore.unroll";
+  try { ui.unroll.checked = localStorage.getItem(UNROLL_KEY) === "1"; } catch { /* 저장소 사용 불가 */ }
+  tab.setUnroll(ui.unroll.checked);
+  ui.unroll.onchange = async () => {
+    const on = ui.unroll.checked;
+    try { localStorage.setItem(UNROLL_KEY, on ? "1" : "0"); } catch { /* 저장소 사용 불가 */ }
+    let changed = true;
+    if (tab.active) {
+      changed = tab.setUnroll(on);
+    } else if (state.loaded && state.source) {
+      stop();
+      const keep = state.parts.map(p => ({ visible: p.visible, audible: p.audible, volume: p.volume, program: p.program }));
+      try {
+        await loadScore(state.source.content, state.source.name, keep);
+        changed = state.unrolled || !on;
+      } catch (err) {
+        console.error(err);
+        hideOverlay();
+        toast("다시 그리기 중 오류: " + err.message);
+      }
+    }
+    if (!changed) toast("이 악보에는 펼칠 반복 기호가 없습니다.");
+  };
 
   // 템포 슬라이더는 BPM 단위. 악보의 기본 템포를 기준으로 재생 속도 비율을 정한다
   // (곡 중간에 템포가 바뀌는 악보는 같은 비율로 함께 빨라지거나 느려진다)
