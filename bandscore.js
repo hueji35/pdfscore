@@ -1484,6 +1484,7 @@ function parseSystems(list) {
       // 도돌이표 점을 먼저 골라내야 점음표의 점으로 잘못 붙지 않는다
       const rdots = markRepeatDots(sys, pg.glyphs, verts);
       const nav = navigationMarks(sys, pg.glyphs, edges, rdots);
+      const chordsAt = [];
       const parsed = layout.map(p => {
         if (p.kind === "guitar" || p.kind === "bass") {
           const ms = parseTabStaff(pg, sys.staves[p.tab], pg.glyphs, verts, beams, sb, fulls, p.std != null ? smallHeadXs(sys.staves[p.std], pg.glyphs) : []);
@@ -1499,6 +1500,31 @@ function parseSystems(list) {
         }
         return parseStdStaff(pg, sys.staves[p.std], pg.glyphs, verts, beams, sb, { drums: p.kind === "drums", others: pageStaves, fulls });
       });
+      // 코드 이름: 같은 마디에서 가장 가까운 음표·쉼표의 박 위치에 둔다 (없으면 마디 안의 위치 비율로)
+      for (const c of chordSymbols(sys, pg, edges)) {
+        const i = c.measure, full = fulls[i];
+        let best = null, firstX = Infinity, restX = null;
+        for (const m of parsed) {
+          const evs = (m[i] || []).filter(e => (e.staff ?? 0) === 0);
+          for (const v of new Set(evs.map(e => e.voice || 1))) {
+            let t = 0;
+            for (const e of evs.filter(e => (e.voice || 1) === v).sort((a, b) => a.x - b.x)) {
+              // 온쉼표는 마디 가운데에 그려지므로 박 위치의 기준이 되지 않는다
+              if (e.rest && measureLength([e]) >= full - 1e-6) { restX = e.x; continue; }
+              const d = Math.abs(e.x - c.x);
+              if (d < 6 && (!best || d < best.d)) best = { d, t };
+              firstX = Math.min(firstX, e.x);
+              t += measureLength([e]);
+            }
+          }
+        }
+        // 위치 비율은 마디의 내용이 시작하는 곳부터 (단 첫 마디는 음자리표·조표 뒤). 온쉼표뿐이면 쉼표가 내용의 가운데
+        const start = firstX < Infinity ? firstX - 2 : restX !== null ? Math.max(edges[i], 2 * restX - edges[i + 1]) : edges[i] + 4;
+        const unit = 1 / tsList[i][1];
+        const t = best && best.t < full - 1e-6 ? best.t
+          : Math.min(full - unit, Math.max(0, Math.round((c.x - start) / (edges[i + 1] - start) * full / unit) * unit));
+        (chordsAt[i] ||= []).push({ t, name: c.name });
+      }
       // 이 단의 파트 → 전체 파트: 종류와 그 종류 안의 순번으로 맞춘다 (단마다 보표 수가 달라도 섞이지 않게)
       const ord = {};
       const targets = layout.map(p => {
@@ -1539,7 +1565,8 @@ function parseSystems(list) {
             (q.bbox[0] + q.bbox[2]) / 2 > edges[i] - 4 && (q.bbox[0] + q.bbox[2]) / 2 < edges[i + 1] - 4);
           // 조표: 이 단의 첫 오선보(보컬·건반) 기준
           const keyOf = parsed.map((m, k) => layout[k].kind !== "guitar" && layout[k].kind !== "bass" && layout[k].kind !== "drums" ? m[i]?.key ?? m.key : undefined).find(k => k !== undefined);
-          bars.push({ ts: tsList[i], page: pi, x: edges[i], nav: r === 0 ? nav[i] || {} : {}, multiRest: restN[i] > 1, keyChange: keyMark >= 2, rehearsal, key: keyOf });
+          bars.push({ ts: tsList[i], page: pi, x: edges[i], nav: r === 0 ? nav[i] || {} : {}, multiRest: restN[i] > 1, keyChange: keyMark >= 2, rehearsal, key: keyOf,
+            chords: r === 0 ? chordsAt[i] : undefined });
           layout.forEach((p, k) => targets[k].measures.push(r === 0 ? barRest(parsed[k][i] || [], fulls[i]) : []));
           parts.forEach(pp => { while (pp.measures.length < bars.length) pp.measures.push([]); });
         }
@@ -1793,10 +1820,33 @@ function beatTex(e, kind, strings = 6, perc = false) {
   if (e.dots) fx.push(e.dots === 2 ? "dd" : "d");
   if (e.tuplet) fx.push(`tu ${e.tuplet}`);
   if (e.tremolo && !e.rest) fx.push("tp 16");
+  if (e.chord) fx.push(`ch "${e.chord}"`);
   if (kind === "tab" && e.whammy && (e.whammy[0] || e.whammy[1]) && !e.rest) fx.push(`tb (${e.whammy[0] * 2} ${e.whammy[1] * 2})`); // 4분의 1음 단위
   // 음표 효과({t})와 박 효과가 함께 있을 때 헷갈리지 않도록 화음 괄호로 감싼다
   if (fx.length && body !== "r" && !body.startsWith("(")) body = `(${body})`;
   return `:${e.dur} ${body}${fx.length ? `{${fx.join(" ")}}` : ""}`;
+}
+
+/** 코드 이름을 박에 붙인다. 박 중간에서 바뀌는데 그 박이 쉼표면 쉼표를 둘로 나눈다 */
+function placeChords(events, chords) {
+  const evs = events.map(e => ({ ...e }));
+  const durOf = len => {
+    for (const dur of [1, 2, 4, 8, 16, 32]) {
+      if (Math.abs(len - 1 / dur) < 1e-6) return { dur, dots: 0 };
+      if (Math.abs(len - 1.5 / dur) < 1e-6) return { dur, dots: 1 };
+    }
+    return null;
+  };
+  for (const c of [...chords].sort((a, b) => a.t - b.t)) {
+    let k = -1, start = 0;
+    for (let j = 0, t = 0; j < evs.length; t += measureLength([evs[j]]), j++) if (t <= c.t + 1e-6) { k = j; start = t; }
+    if (k < 0) continue;
+    const e = evs[k], a = c.t - start, b = measureLength([e]) - a;
+    if (a > 1e-6 && e.rest && !e.tuplet && durOf(a) && durOf(b)) {
+      evs.splice(k, 1, { ...e, ...durOf(a) }, { ...e, ...durOf(b), chord: c.name });
+    } else e.chord = e.chord ? e.chord + " " + c.name : c.name;
+  }
+  return evs;
 }
 
 /** 마디 앞에 붙는 연주 순서 메타데이터 */
@@ -1900,7 +1950,8 @@ export function toAlphaTex(score, title = "", tempo = 120) {
         if (bars[i].key !== undefined && bars[i].key !== lastKey && kind !== "drums") { head += `\\ks ${keyName(bars[i].key)} `; lastKey = bars[i].key; }
         if (i === 0 && bars[0].anacrusis) head += "\\ac ";
         if (first && v === 1) head = navTex(bars[i].nav, hasCoda) + head; // 연주 순서는 첫 트랙에만
-        out += head + fitted.map(e => beatTex(e, kind, p.strings, p.extra)).join(" ") + " |\n";
+        const beats = first && v === 1 && bars[i].chords ? placeChords(fitted, bars[i].chords) : fitted;
+        out += head + beats.map(e => beatTex(e, kind, p.strings, p.extra)).join(" ") + " |\n";
       });
     }
     return out;
@@ -2071,4 +2122,49 @@ export function navigationMarks(sys, glyphs, edges, repeatDots) {
     if (s) marks[measureAt(Math.min(d.x, edges[n] - 2))].ds = true;
   }
   return marks;
+}
+
+/* ------------------------------------------------- 12) 코드 이름 */
+
+const CHORD_RE = /^(N\.C\.|[A-G][#b]?(?:m|M|maj|min|dim|aug|sus|add|[0-9]|[()#b+\-,])*(?:\/[A-G][#b]?)?)$/;
+
+/**
+ * 단 맨 위 보표 바로 위에 적힌 코드 이름. 글자는 도형으로 그린 것(q.ch, 숫자는 q.cls "d0"~"d9")이나 PDF 글자.
+ * 위아래로 겹쳐 적은 분수 꼴(위 코드 / 아래 베이스음)은 "C/G"로 합친다.
+ * @returns [{ x, name, measure }]
+ */
+export function chordSymbols(sys, pg, edges) {
+  const top = sys.staves[0].top, n = edges.length - 1;
+  const near = b => b[3] < top - 0.5 && b[3] > top - 26;
+  const letters = [];
+  for (const q of pg.glyphs) {
+    const s = q.ch || (/^d\d$/.test(q.cls || "") && q.cls.slice(1));
+    if (s && near(q.bbox)) letters.push({ s, b: q.bbox });
+  }
+  for (const t of pg.texts || []) {
+    const b = [t.x, t.y - t.size * 0.7, t.x + t.str.trim().length * t.size * 0.55, t.y];
+    if (near(b) && CHORD_RE.test(t.str.trim())) letters.push({ s: t.str.trim(), b });
+  }
+  // 이어진 글자를 낱말로 (위첨자 "(9)"처럼 조금 떠 있는 글자도 세로로 겹치면 같은 낱말)
+  const words = [];
+  for (const l of letters.sort((a, b) => a.b[0] - b.b[0])) {
+    const h = l.b[3] - l.b[1];
+    const w = words.find(w => l.b[0] - w.b[2] < Math.max(2.5, h * 0.7) && l.b[0] - w.b[2] > -1 && l.b[1] < w.b[3] - 0.5 && l.b[3] > w.b[1] + 0.5);
+    if (w) { w.s += l.s; w.b = [w.b[0], Math.min(w.b[1], l.b[1]), Math.max(w.b[2], l.b[2]), Math.max(w.b[3], l.b[3])]; }
+    else words.push({ s: l.s, b: [...l.b] });
+  }
+  // 분수 꼴: 바로 아래에 가로로 겹치는 베이스음
+  for (const w of words) {
+    if (w.used) continue;
+    const lo = words.find(o => o !== w && !o.used && o.b[1] > w.b[3] - 0.5 && o.b[1] - w.b[3] < 5 && o.b[0] < w.b[2] && o.b[2] > w.b[0] && /^[A-G][#b]?$/.test(o.s));
+    if (lo) { w.s += "/" + lo.s; lo.used = true; w.b[0] = Math.min(w.b[0], lo.b[0]); }
+  }
+  const out = [];
+  for (const w of words) {
+    if (w.used || !CHORD_RE.test(w.s) || w.b[0] < edges[0] - 4 || w.b[0] > edges[n]) continue;
+    let i = 0;
+    while (i < n - 1 && w.b[0] >= edges[i + 1] - 2) i++;
+    out.push({ x: w.b[0], name: w.s, measure: i });
+  }
+  return out;
 }

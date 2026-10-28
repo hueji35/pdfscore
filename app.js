@@ -133,11 +133,11 @@
   async function openVectorPdf(file) {
     if (location.protocol === "file:") return false; // ES 모듈은 웹 주소로 열었을 때만
     showOverlay("PDF 악보 데이터 읽는 중…");
-    const [pdfjs, { extractPage, DOC_OPTIONS }, B, { SHAPES }] = await Promise.all([
+    const [pdfjs, { extractPage, DOC_OPTIONS }, B, { SHAPES, CHORD_SHAPES }] = await Promise.all([
       import("./lib/pdfjs/pdf.min.mjs"), import("./pdfvector.js"), import("./bandscore.js"), import("./bandshapes.js")]);
     pdfjs.GlobalWorkerOptions.workerSrc = new URL("lib/pdfjs/pdf.worker.min.mjs", location.href).href;
     const labelLetter = B.uprightClassifier((await import("./labelshapes.js")).LABEL_SHAPES);
-    const classify = B.makeClassifier(SHAPES);
+    const classify = B.makeClassifier(SHAPES), chordLetter = B.makeClassifier(CHORD_SHAPES);
     // 악보 글꼴로 찍은 기호(피아노 악보 등)의 윤곽을 받기 위한 옵션 포함
     const doc = await pdfjs.getDocument({ data: new Uint8Array(await file.arrayBuffer()), ...DOC_OPTIONS }).promise;
     const pages = [];
@@ -145,7 +145,10 @@
       for (let i = 1; i <= doc.numPages; i++) {
         showOverlay(`PDF 악보 데이터 읽는 중… ${i}/${doc.numPages}쪽`);
         const pg = await extractPage(pdfjs, await doc.getPage(i));
-        for (const g of pg.glyphs) g.cls = classify(g.segs);
+        for (const g of pg.glyphs) {
+          g.cls = classify(g.segs);
+          if (!g.cls && !g.text) g.ch = chordLetter(g.segs); // 코드 이름 글자 (다른 기호로 분류되지 않은 것만)
+        }
         // 세로로 쓴 파트 이름 글자 (다른 기호로 분류된 것도 글자로 읽어 둔다)
         for (const g of pg.glyphs) if (g.bbox[2] - g.bbox[0] < 12 && g.bbox[3] - g.bbox[1] < 12) g.lbl = labelLetter(g.segs);
         pages.push(pg);
