@@ -1156,13 +1156,61 @@ export function partsOfSystem(sys, glyphs) {
       (q.bbox[1] + q.bbox[3]) / 2 > top && (q.bbox[1] + q.bbox[3]) / 2 < bot).sort((a, b) => a.x - b.x);
     if (chars.length) p.label = chars.map(q => q.cls.slice(3)).join("");
   }
+  // 세로로 쓴 파트 이름(아래에서 위로 읽음): 이름 가운데와 가장 가까운 파트
+  const x0 = Math.min(...sys.staves.map(s => s.x0));
+  for (const w of verticalWords(glyphs.filter(q => q.lbl && q.bbox[2] < x0 + 0.5 && q.bbox[0] > x0 - 45 &&
+    q.bbox[1] > sys.staves[0].top - 30 && q.bbox[3] < sys.bottom + 30))) {
+    const cy = (w[0].bbox[3] + w[w.length - 1].bbox[1]) / 2;
+    let best = null, bd = Infinity;
+    for (const p of parts) {
+      const ks = [p.std, p.tab, p.lower].filter(k => k !== undefined && k !== null).map(k => sys.staves[k]);
+      const top = Math.min(...ks.map(s => s.top)), bot = Math.max(...ks.map(s => s.bottom));
+      const d = cy < top ? top - cy : cy > bot ? cy - bot : 0;
+      if (d < bd) { bd = d; best = p; }
+    }
+    if (best && bd < 10 && !best.label) best.label = w.map(q => q.lbl.slice(3)).join("");
+  }
   for (let i = 0; i + 1 < parts.length; i++) {
     const a = parts[i], b = parts[i + 1];
     if (a.kind === "std" && b.kind === "std" && a.clef === "G" && b.clef === "F" && !a.label?.match(/^(Vo|Cho)/)) {
-      a.kind = "piano"; a.lower = b.std; parts.splice(i + 1, 1);
+      a.kind = "piano"; a.lower = b.std; a.label ??= b.label; parts.splice(i + 1, 1);
     }
   }
   return parts;
+}
+
+/** 세로 글자를 단어로 묶는다 (같은 열에서 간격 없이 이어진 글자, 아래에서 위 순서) */
+function verticalWords(glyphs) {
+  const cx = q => (q.bbox[0] + q.bbox[2]) / 2;
+  const left = [...glyphs].sort((a, b) => b.bbox[3] - a.bbox[3]), words = [];
+  while (left.length) {
+    const w = [left.shift()];
+    for (let k = 0; k < left.length;) {
+      const q = left[k], last = w[w.length - 1];
+      if (Math.abs(cx(q) - cx(w[0])) < 2.5 && last.bbox[1] - q.bbox[3] < 2.5) { w.push(q); left.splice(k, 1); }
+      else k++;
+    }
+    if (w.length > 1) words.push(w);
+  }
+  return words;
+}
+
+/** 세로로 쓴 글자를 바로 세워서(시계 방향 90°) 사전과 비교하는 분류기 */
+export function uprightClassifier(table) {
+  const classify = makeClassifier(table);
+  return segs => classify(segs.map(s => ({ op: s.op, pts: s.pts.map((v, i) => (i % 2 === 0 ? -s.pts[i + 1] : s.pts[i - 1])) })));
+}
+
+/** 파트 이름으로 GM 음색 번호(0부터) 추정. 모르면 null */
+export function programOfName(name = "") {
+  const hints = [
+    [/^A\.?\s*G|acoustic|ac\.?\s*g|アコ/i, 25], [/^E\.?\s*B|bass|^Ba\b/i, 33], [/^E\.?\s*G|^Gt|guitar|ギター/i, 29],
+    [/^Cho|chorus|choir/i, 52], [/^Vo|vocal|voice/i, 53], [/organ|^Org/i, 16], [/string/i, 48], [/brass/i, 61],
+    [/sax/i, 65], [/flute|^Fl\b/i, 73], [/violin|^Vn/i, 40], [/synth.*piano|e\.?\s*p(iano)?\b/i, 4], [/piano|^Pf|^Pno/i, 0],
+    [/^Syn|synth/i, 89], [/^Key|keyboard/i, 0],
+  ];
+  for (const [re, prog] of hints) if (re.test(name)) return prog;
+  return null;
 }
 
 /** 박자표: 보표 앞쪽의 C 또는 위아래 숫자 */
@@ -1751,18 +1799,6 @@ function beatTex(e, kind, strings = 6, perc = false) {
   return `:${e.dur} ${body}${fx.length ? `{${fx.join(" ")}}` : ""}`;
 }
 
-/** 악보에 적힌 파트 이름 → 트랙 이름 */
-function labelName(t) {
-  const roman = { I: 1, II: 2, III: 3, IV: 4 };
-  if (/^Vo/i.test(t)) return "Vocal";
-  if (/^Syn/i.test(t)) return "Synth";
-  if (/^Ba/i.test(t)) return "Bass";
-  if (/^Dr/i.test(t)) return "Drums";
-  const g = t.match(/^Gt-?(I+|IV|\d)?/);
-  if (g) return "Guitar" + (g[1] ? " " + (roman[g[1]] || g[1]) : "");
-  return t;
-}
-
 /** 마디 앞에 붙는 연주 순서 메타데이터 */
 function navTex(nav = {}, hasCoda) {
   let t = "";
@@ -1794,13 +1830,18 @@ export function toAlphaTex(score, title = "", tempo = 120) {
     let program = programs[p.kind];
     if (p.kind === "guitar") name = `Guitar ${++gtr}`;
     if (p.kind === "std" && !p.extra) name = ++std === 1 ? "Vocal" : `Part ${std}`;
-    if (p.label) name = labelName(p.label) || name;
     if (p.extra && p.kind !== "drums") { program = extraPrograms[ex] ?? 0; name = extraNames[ex++] || `Keyboard ${ex}`; }
     if (p.extra && p.kind === "drums") name = "Percussion";
+    // 악보에 적힌 파트 이름이 있으면 그대로 쓰고, 이름으로 음색을 고른다 (Key.1처럼 이름만으로 모르면 위의 기본값)
+    if (p.label) {
+      name = p.label;
+      const named = programOfName(p.label);
+      if (named !== null && !(p.extra && /^Key/i.test(p.label))) program = named;
+    }
     const kind = p.kind === "guitar" || p.kind === "bass" ? "tab" : p.kind === "drums" ? "drums" : "std";
     tex += `\\track "${name}"\n`;
     if (kind === "drums") tex += `\\instrument percussion\n\\articulation defaults\n\\staff {score}\n`;
-    else if (kind === "tab") tex += `\\instrument ${programs[p.kind]}\n\\staff {score tabs}\n\\tuning ${TUNINGS[p.strings] || TUNINGS[6]}\n` + (p.kind === "bass" ? "\\clef F4\n" : "");
+    else if (kind === "tab") tex += `\\instrument ${program}\n\\staff {score tabs}\n\\tuning ${TUNINGS[p.strings] || TUNINGS[6]}\n` + (p.kind === "bass" ? "\\clef F4\n" : "");
     else tex += `\\instrument ${program ?? 0}\n\\staff {score}\n` + (p.clef === "F" ? "\\clef F4\n" : "");
     // 피아노는 큰보표: 오른손·왼손을 각각 보표로, 보표마다 성부 나누기
     if (p.kind === "piano") {

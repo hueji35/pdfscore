@@ -71,6 +71,7 @@ window.createTabMode = function (h) {
     const old = keep && keep.length === tracks.length ? keep : null;
     parts = tracks.map((t, i) => ({ track: t, visible: true, audible: true, volume: 1, index: i, ...(old && old[i]) }));
     keep = null;
+    for (const p of parts) if (p.program !== undefined) p.track.playbackInfo.program = p.program;
     ui.partList.innerHTML = "";
     parts.forEach((p, i) => {
       const drum = p.track.staves.some(s => s.isPercussion);
@@ -80,7 +81,13 @@ window.createTabMode = function (h) {
         <div class="name" title="${h.escapeHtml(p.track.name)}">${h.escapeHtml(p.track.name || `트랙 ${i + 1}`)}${drum ? " <small>드럼</small>" : ""}</div>
         <label class="toggle" title="악보에 표시"><input type="checkbox" data-k="visible"${p.visible ? " checked" : ""}>👁</label>
         <label class="toggle" title="소리"><input type="checkbox" data-k="audible"${p.audible ? " checked" : ""}>🔊</label>
-        <div class="row2"><input type="range" min="0" max="1.5" step="0.05" value="${p.volume}" title="음량"></div>`;
+        <div class="row2">${drum ? "" : '<select title="재생 악기 소리"></select>'}<input type="range" min="0" max="1.5" step="0.05" value="${p.volume}" title="음량"></div>`;
+      const sel = li.querySelector("select");
+      if (sel) {
+        sel.innerHTML = h.GM.map((n, k) => `<option value="${k}">${k + 1}. ${n.replace(/_/g, " ")}</option>`).join("");
+        sel.value = p.track.playbackInfo.program;
+        sel.onchange = () => setProgram(i, +sel.value);
+      }
       li.querySelector('[data-k="visible"]').onchange = e => setVisible(i, e.target.checked);
       li.querySelector('[data-k="audible"]').onchange = e => setAudible(i, e.target.checked);
       li.querySelector("input[type=range]").oninput = e => { p.volume = +e.target.value; api.changeTrackVolume([p.track], p.volume); };
@@ -100,6 +107,19 @@ window.createTabMode = function (h) {
     p.li.querySelector('[data-k="visible"]').checked = on;
     clearTimeout(renderTimer);
     renderTimer = setTimeout(() => api.renderTracks(parts.filter(x => x.visible).map(x => x.track)), 60);
+  }
+  // 음색 바꾸기: 트랙의 프로그램을 바꾸고 재생 데이터를 다시 만든다 (재생 위치는 그대로)
+  function setProgram(i, program) {
+    const p = parts[i];
+    p.program = program;
+    p.track.playbackInfo.program = program;
+    const t = original && original.tracks[p.index];
+    if (t) t.playbackInfo.program = program; // 반복 펼치기를 바꿔 다시 그려도 유지
+    const at = api.tickPosition, was = playing;
+    if (was) api.pause();
+    api.loadMidiForScore();
+    api.tickPosition = at;
+    if (was) setTimeout(() => api.play(), 50);
   }
   function setAudible(i, on) {
     const p = parts[i];
@@ -214,7 +234,7 @@ window.createTabMode = function (h) {
       unroll = on;
       if (!original) return true;
       api.stop();
-      keep = parts.map(p => ({ visible: p.visible, audible: p.audible, volume: p.volume }));
+      keep = parts.map(p => ({ visible: p.visible, audible: p.audible, volume: p.volume, program: p.program }));
       return show() || !on;
     },
     toggle() { if (api) api.playPause(); },

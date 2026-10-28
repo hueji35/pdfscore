@@ -136,6 +136,7 @@
     const [pdfjs, { extractPage, DOC_OPTIONS }, B, { SHAPES }] = await Promise.all([
       import("./lib/pdfjs/pdf.min.mjs"), import("./pdfvector.js"), import("./bandscore.js"), import("./bandshapes.js")]);
     pdfjs.GlobalWorkerOptions.workerSrc = new URL("lib/pdfjs/pdf.worker.min.mjs", location.href).href;
+    const labelLetter = B.uprightClassifier((await import("./labelshapes.js")).LABEL_SHAPES);
     const classify = B.makeClassifier(SHAPES);
     // 악보 글꼴로 찍은 기호(피아노 악보 등)의 윤곽을 받기 위한 옵션 포함
     const doc = await pdfjs.getDocument({ data: new Uint8Array(await file.arrayBuffer()), ...DOC_OPTIONS }).promise;
@@ -145,6 +146,8 @@
         showOverlay(`PDF 악보 데이터 읽는 중… ${i}/${doc.numPages}쪽`);
         const pg = await extractPage(pdfjs, await doc.getPage(i));
         for (const g of pg.glyphs) g.cls = classify(g.segs);
+        // 세로로 쓴 파트 이름 글자 (다른 기호로 분류된 것도 글자로 읽어 둔다)
+        for (const g of pg.glyphs) if (g.bbox[2] - g.bbox[0] < 12 && g.bbox[3] - g.bbox[1] < 12) g.lbl = labelLetter(g.segs);
         pages.push(pg);
         if (i === Math.min(3, doc.numPages) && !B.looksLikeBandScore(pages)) return false; // 앞 몇 쪽으로 판단
       }
@@ -1429,7 +1432,7 @@
   /* ------------------------------------------------ 밴드 악보 모드 연결 */
   let tabTotal = 0;
   const tab = window.createTabMode({
-    ui, toast, escapeHtml, hideOverlay,
+    ui, toast, escapeHtml, hideOverlay, GM,
     fileName: () => fileName,
     alert: (title, msg) => alertBox(title, `<p>${escapeHtml(msg)}</p>`),
     status: msg => setOmrBar(msg),
