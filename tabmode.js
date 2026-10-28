@@ -118,9 +118,20 @@ window.createTabMode = function (h) {
     if (t) t.playbackInfo.program = program; // 반복 펼치기를 바꿔 다시 그려도 유지
     const at = api.tickPosition, was = playing;
     if (was) api.pause();
+    // 새 재생 데이터를 신스가 받으면 "멈춤" 상태가 오고 위치가 처음으로 돌아간다. 그 뒤에 위치를 되돌리고 이어서 재생
+    // (그 전에 위치를 옮기면 무시된다. 신스의 midiLoaded 이벤트는 구독하면 alphaTab 안에서 오류가 나서 쓰지 않는다)
+    let done = false;
+    const resume = () => {
+      if (done) return;
+      done = true;
+      api.playerStateChanged.off(onState);
+      api.tickPosition = at;
+      if (was) setTimeout(() => api.play(), 30);
+    };
+    const onState = e => { if (e.stopped) setTimeout(resume, 30); };
+    api.playerStateChanged.on(onState);
+    setTimeout(resume, 2000); // 신호를 못 받는 경우 대비
     api.loadMidiForScore();
-    api.tickPosition = at;
-    if (was) setTimeout(() => api.play(), 50);
   }
   function setAudible(i, on) {
     const p = parts[i];
