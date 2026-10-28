@@ -659,12 +659,20 @@ export function tupletFactor(n) { return n === 5 ? 4 / 5 : n === 7 ? 4 / 7 : 2 /
  * 셋잇단 "3": 숫자 가운데에 가장 가까운, 길이가 같은 연속 3개 음에 표시한다
  * (8분 셋잇단은 좁고 4분 셋잇단은 넓게 퍼져 있으므로 거리 대신 순서로 고른다)
  */
-function markTuplet(events, t, glyphs = []) {
+function markTuplet(events, t, glyphs = [], rects = []) {
   const cx = (t.bbox[0] + t.bbox[2]) / 2;
   const n = +t.cls.slice(6) || 3; // 3·5·6잇단 (6잇단은 16분 6개 = 8분 셋잇단 길이)
   // 숫자 양옆에 괄호선(브래킷)이 있으면 그 범위 안의 음 전부 (4분+8분처럼 길이가 섞인 셋잇단)
-  const br = glyphs.find(q => !q.cls && q.bbox[0] < cx - 3 && q.bbox[2] > cx + 3 && q.bbox[2] - q.bbox[0] > 8 &&
+  let br = glyphs.find(q => !q.cls && q.bbox[0] < cx - 3 && q.bbox[2] > cx + 3 && q.bbox[2] - q.bbox[0] > 8 &&
     q.bbox[3] - q.bbox[1] < 6 && q.bbox[1] < t.bbox[3] + 1 && q.bbox[3] > t.bbox[1] - 1);
+  // 선으로 그린 브래킷: 숫자 왼쪽에서 끝나는 가로선과 오른쪽에서 시작하는 가로선
+  if (!br) {
+    const ty = (t.bbox[1] + t.bbox[3]) / 2, th = t.bbox[3] - t.bbox[1];
+    const hl = rects.filter(r => r.y1 - r.y0 < 1.2 && r.x1 - r.x0 > 1.5 && Math.abs((r.y0 + r.y1) / 2 - ty) < th * 0.8);
+    const L = hl.filter(r => r.x1 <= t.bbox[0] + 1 && t.bbox[0] - r.x1 < 4).sort((a, b) => b.x1 - a.x1)[0];
+    const R = hl.filter(r => r.x0 >= t.bbox[2] - 1 && r.x0 - t.bbox[2] < 4).sort((a, b) => a.x0 - b.x0)[0];
+    if (L && R) br = { bbox: [L.x0, Math.min(L.y0, R.y0), R.x1, Math.max(L.y1, R.y1)] };
+  }
   if (br) {
     const all = events.filter(e => !e.tuplet && e.x > br.bbox[0] - 1.5 && e.x < br.bbox[2] + 1.5);
     // 2성부(드럼 등)는 성부마다 따로 묶여 있으므로 길이가 맞는 성부 하나만
@@ -791,7 +799,9 @@ export function parseStdStaff(page, staff, glyphs, verts, beams, bars, opts = {}
   const key = opts.key ?? keyOf(staff, glyphs, firstX);
   const stems = verts.filter(v => v.w < 0.8 && v.y1 - v.y0 > g * 1.5 && v.x > staff.x0 && v.x < staff.x1 &&
     !barXs.some(x => Math.abs(x - v.x) < 0.8) && v.y1 > staff.top - g * 6 && v.y0 < staff.bottom + g * 6);
-  const flags = near.filter(q => q.cls === "flag" || q.cls === "flag16");
+  // 꼬리는 덧줄 음의 긴 기둥 끝에 달려 오선에서 멀 수 있다
+  const flags = glyphs.filter(q => (q.cls === "flag" || q.cls === "flag16") && q.x > staff.x0 - 2 && q.x < staff.x1 + 2 &&
+    (q.bbox[1] + q.bbox[3]) / 2 > staff.top - g * 9 && (q.bbox[1] + q.bbox[3]) / 2 < staff.bottom + g * 9);
   // 머리 → 기둥 연결: 머리 오른쪽 끝(위로 뻗은 기둥) 또는 왼쪽 끝(아래로 뻗은 기둥)에 닿고 세로로 겹침
   const stemOf = new Map();
   for (const h of heads) {
@@ -814,7 +824,14 @@ export function parseStdStaff(page, staff, glyphs, verts, beams, bars, opts = {}
     if (best) stemOf.set(h, best);
   }
   const groups = new Map();
-  for (const [h, s] of stemOf) { if (!groups.has(s)) groups.set(s, []); groups.get(s).push(h); }
+  // 화음 하나를 기둥 여러 개로 겹쳐 그리기도 한다: x가 같고 같은 방향으로 겹친 기둥은 하나로
+  const canon = new Map();
+  for (const s of new Set(stemOf.values())) {
+    const dirOf = st => { const hs = [...stemOf].filter(([, v]) => v === st).map(([h]) => (h.bbox[1] + h.bbox[3]) / 2); const c = hs.reduce((a, b) => a + b, 0) / hs.length; return Math.abs(st.y0 - c) > Math.abs(st.y1 - c) ? "up" : "down"; };
+    const same = [...canon.keys()].find(o => Math.abs(o.x - s.x) < 0.6 && o.y0 < s.y1 && s.y0 < o.y1 && dirOf(o) === dirOf(s));
+    canon.set(s, same ? canon.get(same) : s);
+  }
+  for (const [h, s0] of stemOf) { const s = canon.get(s0) || s0; if (!groups.has(s)) groups.set(s, []); groups.get(s).push(h); }
   const events = [];
   const mkNotes = hs => hs.map(h => {
     const cy = (h.bbox[1] + h.bbox[3]) / 2;
@@ -881,7 +898,7 @@ export function parseStdStaff(page, staff, glyphs, verts, beams, bars, opts = {}
   const tupReach = opts.drums ? 9 : 5;
   for (const t of glyphs.filter(q => /^tuplet\d$/.test(q.cls || "") && q.x > staff.x0 - 2 && q.x < staff.x1 + 2 &&
     (q.bbox[1] + q.bbox[3]) / 2 > staff.top - g * tupReach && (q.bbox[1] + q.bbox[3]) / 2 < staff.bottom + g * tupReach &&
-    (opts.drums || ownerOf((q.bbox[1] + q.bbox[3]) / 2) === staff))) markTuplet(events, t, glyphs); // 두 보표 사이의 숫자는 가까운 보표 것 (드럼은 위아래로 멀리 찍혀 예외)
+    (opts.drums || ownerOf((q.bbox[1] + q.bbox[3]) / 2) === staff))) markTuplet(events, t, glyphs, page.rects); // 두 보표 사이의 숫자는 가까운 보표 것 (드럼은 위아래로 멀리 찍혀 예외)
   // 임시표(마디 안에서 같은 음에 계속 적용) + 조표
   const accs = near.filter(q => q.cls === "sharp" || q.cls === "flat" || q.cls === "natural");
   const keyAlter = {};
