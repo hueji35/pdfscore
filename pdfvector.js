@@ -83,6 +83,31 @@ function isOvalsAndRects(segs) {
   return oval > 0 && rect > 0;
 }
 
+/** pdf.js가 넘겨주는 글자 윤곽(SVG 경로 문자열, em 단위, y 위로 +)을 [{op, pts}]로. 2차 곡선은 3차로 바꾼다 */
+function parseGlyphPath(str) {
+  const out = [];
+  const re = /([MLQCZ])([^MLQCZ]*)/g;
+  let m, cx = 0, cy = 0, sx = 0, sy = 0;
+  while ((m = re.exec(str))) {
+    const v = m[2].trim() ? m[2].trim().split(/[\s,]+/).map(Number) : [];
+    if (m[1] === "M") { out.push({ op: 0, pts: [v[0], v[1]] }); cx = sx = v[0]; cy = sy = v[1]; }
+    else if (m[1] === "L") { out.push({ op: 1, pts: [v[0], v[1]] }); cx = v[0]; cy = v[1]; }
+    else if (m[1] === "Q") {
+      const [qx, qy, x, y] = v;
+      out.push({ op: 2, pts: [cx + 2 / 3 * (qx - cx), cy + 2 / 3 * (qy - cy), x + 2 / 3 * (qx - x), y + 2 / 3 * (qy - y), x, y] });
+      cx = x; cy = y;
+    } else if (m[1] === "C") { out.push({ op: 2, pts: v.slice(0, 6) }); cx = v[4]; cy = v[5]; }
+    else if (m[1] === "Z") { out.push({ op: 3, pts: [] }); cx = sx; cy = sy; }
+  }
+  return out;
+}
+
+/**
+ * 악보 글꼴(Sibelius의 Opus, Finale의 Maestro 등)로 찍은 기호도 도형 기호와 같은 형태로 꺼내려면
+ * getDocument에 { disableFontFace: true, fontExtraProperties: true }를 주어야 한다 (글자 윤곽을 받기 위해).
+ */
+export const DOC_OPTIONS = { disableFontFace: true, fontExtraProperties: true };
+
 export async function extractPage(pdfjs, page) {
   const OPS = pdfjs.OPS;
   const vp = page.getViewport({ scale: 1 });
@@ -92,19 +117,90 @@ export async function extractPage(pdfjs, page) {
   const glyphs = [], rects = [], polys = [];
   let ctm = [1, 0, 0, 1, 0, 0];
   const stack = [];
-  let fill = "#000";
+  let fill = "#000", lineWidth = 1;
+  // 글자 상태
+  let font = null, fontSize = 0, tm = [1, 0, 0, 1, 0, 0], tlm = tm, charSp = 0, wordSp = 0, hScale = 1, rise = 0, leading = 0;
+  const pathCache = new Map();
+  const glyphPath = (f, g) => {
+    const key = f.loadedName + "_path_" + g.fontChar;
+    if (!pathCache.has(key)) {
+      let segs = null;
+      try { const str = page.commonObjs.get(key); if (typeof str === "string" && str) segs = parseGlyphPath(str); } catch { /* 윤곽 없음 */ }
+      pathCache.set(key, segs);
+    }
+    return pathCache.get(key);
+  };
+  const moveText = (x, y) => { tlm = mul(tlm, [1, 0, 0, 1, x, y]); tm = tlm; };
+  const texts = [];
+  const showText = list => {
+    if (!font) return;
+    const fm = font.fontMatrix || [0.001, 0, 0, 0.001, 0, 0];
+    // 글자 문자열도 남긴다 (템포 "= 85" 등)
+    const o = mul(flip, mul(ctm, tm));
+    const str = list.map(g => typeof g === "object" && g ? g.unicode || "" : "").join("");
+    if (str.trim()) texts.push({ str, x: o[4], y: o[5], size: Math.abs(fontSize * Math.hypot(tm[2], tm[3])), font: font.name || "" });
+    for (const g of list) {
+      if (typeof g === "number") { tm = mul(tm, [1, 0, 0, 1, -g / 1000 * fontSize * hScale, 0]); continue; }
+      if (!g) continue;
+      const segs0 = glyphPath(font, g);
+      const trm = mul(ctm, mul(tm, [fontSize * hScale, 0, 0, fontSize, 0, rise]));
+      if (segs0 && segs0.length) {
+        // 기준점 기준 상대 좌표(PDF 방향, pt)로 — 도형 기호와 같은 형태
+        const segs = segs0.map(z => ({ op: z.op, pts: z.pts.map((v, k) => k % 2 === 0 ? trm[0] * v + trm[2] * z.pts[k + 1] : trm[1] * z.pts[k - 1] + trm[3] * v) }));
+        const m = mul(flip, [1, 0, 0, 1, trm[4], trm[5]]);
+        const pts = segs.flatMap(z => z.pts.flatMap((v, k) => k % 2 === 0 ? [[m[0] * v + m[2] * z.pts[k + 1] + m[4], m[1] * v + m[3] * z.pts[k + 1] + m[5]]] : []));
+        const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]);
+        glyphs.push({ sig: signature(segs), x: m[4], y: m[5], bbox: [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)],
+          fill, segs, ctm: [1, 0, 0, 1, trm[4], trm[5]], font: font.name, code: g.originalCharCode, uni: g.unicode, text: true });
+        // 사각형 글자(온쉼표·2분쉼표)는 도형 사각형과 같이 다룬다
+        if (isAxisRect(segs)) { const b = glyphs[glyphs.length - 1].bbox; rects.push({ x0: b[0], y0: b[1], x1: b[2], y1: b[3], fill }); }
+      }
+      const w = (g.width || 0) * fm[0];
+      tm = mul(tm, [1, 0, 0, 1, (w * fontSize + charSp + (g.isSpace ? wordSp : 0)) * hScale, 0]);
+    }
+  };
   for (let i = 0; i < ol.fnArray.length; i++) {
     const fn = ol.fnArray[i], args = ol.argsArray[i];
-    if (fn === OPS.save) stack.push({ ctm, fill });
-    else if (fn === OPS.restore) { const s = stack.pop(); if (s) { ctm = s.ctm; fill = s.fill; } }
+    if (fn === OPS.save) stack.push({ ctm, fill, lineWidth });
+    else if (fn === OPS.restore) { const s = stack.pop(); if (s) { ctm = s.ctm; fill = s.fill; lineWidth = s.lineWidth; } }
     else if (fn === OPS.transform) ctm = mul(ctm, args);
     else if (fn === OPS.setFillRGBColor) fill = args[0];
+    else if (fn === OPS.setLineWidth) lineWidth = args[0];
+    else if (fn === OPS.beginText) { tm = tlm = [1, 0, 0, 1, 0, 0]; }
+    else if (fn === OPS.setFont) { try { font = page.commonObjs.get(args[0]); } catch { font = null; } fontSize = args[1]; }
+    else if (fn === OPS.setTextMatrix) { const a = args[0]?.length === 6 ? args[0] : args; tm = tlm = Array.from(a); }
+    else if (fn === OPS.moveText) moveText(args[0], args[1]);
+    else if (fn === OPS.setLeadingMoveText) { leading = -args[1]; moveText(args[0], args[1]); }
+    else if (fn === OPS.setLeading) leading = args[0];
+    else if (fn === OPS.nextLine) moveText(0, -leading);
+    else if (fn === OPS.setCharSpacing) charSp = args[0];
+    else if (fn === OPS.setWordSpacing) wordSp = args[0];
+    else if (fn === OPS.setHScale) hScale = args[0] / 100;
+    else if (fn === OPS.setTextRise) rise = args[0];
+    else if (fn === OPS.showText || fn === OPS.showSpacedText) showText(args[0]);
+    else if (fn === OPS.nextLineShowText) { moveText(0, -leading); showText(args[0]); }
+    else if (fn === OPS.nextLineSetSpacingShowText) { wordSp = args[0]; charSp = args[1]; moveText(0, -leading); showText(args[2]); }
     else if (fn === OPS.constructPath) {
-      const [, data, mm] = args;
+      const [paintOp, data, mm] = args;
       const raw = data && data[0];
       if (!raw || !mm) continue;
       const segs = decodePath(raw);
       const m = mul(flip, ctm);
+      // 선(stroke)으로 그린 가로·세로 직선(오선·기둥·마디줄)은 선 굵기만큼의 사각형으로
+      if (paintOp === OPS.stroke || paintOp === OPS.closeStroke) {
+        const sc = Math.hypot(ctm[0], ctm[1]), half = Math.max(lineWidth * sc, 0.1) / 2;
+        const T = (x, y) => [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]];
+        let prev = null;
+        for (const z of segs) {
+          if (z.op === 0) { prev = T(z.pts[0], z.pts[1]); continue; }
+          if (z.op !== 1 || !prev) { prev = z.op === 2 ? T(z.pts[4], z.pts[5]) : prev; continue; }
+          const p = T(z.pts[0], z.pts[1]);
+          if (Math.abs(p[1] - prev[1]) < 0.05) rects.push({ x0: Math.min(p[0], prev[0]), y0: p[1] - half, x1: Math.max(p[0], prev[0]), y1: p[1] + half, fill, stroked: true });
+          else if (Math.abs(p[0] - prev[0]) < 0.05) rects.push({ x0: p[0] - half, y0: Math.min(p[1], prev[1]), x1: p[0] + half, y1: Math.max(p[1], prev[1]), fill, stroked: true });
+          prev = p;
+        }
+        continue;
+      }
       // 기준점을 옮겨 놓고 그린 도형 = 기호 (같은 모양이 여러 번 쓰임)
       const translated = ctm[4] !== 0 || ctm[5] !== 0;
       const ax = isAxisRect(segs);
@@ -139,7 +235,7 @@ export async function extractPage(pdfjs, page) {
       } else split();
     }
   }
-  return { width: vp.width, height: H, glyphs, rects, polys };
+  return { width: vp.width, height: H, glyphs, rects, polys, texts };
 }
 
 /**

@@ -133,11 +133,12 @@
   async function openVectorPdf(file) {
     if (location.protocol === "file:") return false; // ES 모듈은 웹 주소로 열었을 때만
     showOverlay("PDF 악보 데이터 읽는 중…");
-    const [pdfjs, { extractPage }, B, { SHAPES }] = await Promise.all([
+    const [pdfjs, { extractPage, DOC_OPTIONS }, B, { SHAPES }] = await Promise.all([
       import("./lib/pdfjs/pdf.min.mjs"), import("./pdfvector.js"), import("./bandscore.js"), import("./bandshapes.js")]);
     pdfjs.GlobalWorkerOptions.workerSrc = new URL("lib/pdfjs/pdf.worker.min.mjs", location.href).href;
     const classify = B.makeClassifier(SHAPES);
-    const doc = await pdfjs.getDocument({ data: new Uint8Array(await file.arrayBuffer()) }).promise;
+    // 악보 글꼴로 찍은 기호(피아노 악보 등)의 윤곽을 받기 위한 옵션 포함
+    const doc = await pdfjs.getDocument({ data: new Uint8Array(await file.arrayBuffer()), ...DOC_OPTIONS }).promise;
     const pages = [];
     try {
       for (let i = 1; i <= doc.numPages; i++) {
@@ -151,7 +152,7 @@
       doc.destroy();
     }
     if (!B.looksLikeBandScore(pages)) return false;
-    showOverlay("밴드 악보로 정리하는 중…");
+    showOverlay("악보로 정리하는 중…");
     const score = B.parseBandScore(pages);
     if (!score.parts.length || !score.bars.length) return false;
     const title = file.name.replace(/\.pdf$/i, "");

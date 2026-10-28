@@ -22,9 +22,11 @@ PC, 스마트폰, 태블릿 어디서든 주소만 열면 바로 쓸 수 있고,
 | Guitar Pro (`.gp`, `.gpx`, `.gp3`~`.gp7`) | 그대로 열어 TAB·드럼까지 표시 |
 | MusicXML (`.musicxml`, `.xml`, `.mxl`) | 그대로 열기 |
 | 악보 프로그램으로 만든 밴드 스코어 PDF | PDF 안의 데이터(기호 모양과 위치)를 직접 읽어 TAB·드럼까지 표시. 수 초 안에 열림 |
+| Sibelius·Finale로 만든 피아노 악보 PDF | 악보 글꼴(Opus, Maestro)로 찍힌 기호를 데이터로 읽어 큰보표로 표시. 조표·못갖춘마디·8va·셋잇단 반영 |
 | 그 밖의 PDF, PNG, JPG | 브라우저 안에서 악보 인식(OMR) 후 표시 |
 
-- 데이터로 읽는 방식은 악보 프로그램이 만든 벡터 PDF를 대상으로 합니다. 데이터로 읽을 수 없는 PDF(스캔본 등)는 악보 인식(OMR)으로 처리합니다.
+- 데이터로 읽는 방식은 악보 프로그램이 만든 벡터 PDF(기호를 도형이나 Sibelius·Finale 등의 악보 글꼴로 그린 것)를 대상으로 합니다. 데이터로 읽을 수 없는 PDF(스캔본 등)는 악보 인식(OMR)으로 처리합니다.
+- 복잡한 피아노 편곡(두 보표를 넘나드는 빔, 촘촘한 여러 성부 등)은 일부 마디의 리듬이 틀릴 수 있습니다.
 - 인식 결과는 💾 버튼으로 MusicXML로 저장할 수 있습니다. 틀린 부분은 MuseScore 같은 프로그램에서 고친 뒤 다시 열면 됩니다.
 
 ## 개인정보와 저작권
@@ -81,8 +83,8 @@ python3 server.py
 |---|---|
 | `index.html`, `style.css`, `app.js` | 화면, 파일 열기, MusicXML 표시·재생, 악보 인식 흐름 |
 | `tabmode.js` | Guitar Pro·밴드 스코어 표시와 재생 (alphaTab) |
-| `pdfvector.js` | PDF 그리기 명령에서 기호·선 목록 추출 |
-| `bandscore.js` | 밴드 스코어 해석 (보표·마디·음표·TAB·드럼·연주 순서 → alphaTex) |
+| `pdfvector.js` | PDF 그리기 명령에서 기호·선·글꼴 기호 목록 추출 |
+| `bandscore.js` | 악보 해석 (보표·마디·음표·TAB·드럼·피아노 큰보표·연주 순서 → alphaTex) |
 | `bandshapes.js` | 기호 모양 사전 |
 | `lib/`, `models/` | 외부 라이브러리와 인식 모델 |
 
