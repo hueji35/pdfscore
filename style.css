@@ -58,6 +58,11 @@ body {
 .ctl { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
 .ctl output { min-width: 42px; text-align: right; font-variant-numeric: tabular-nums; }
 .ctl input[type=range] { width: 110px; accent-color: var(--accent); }
+.ctl-select {
+  font: inherit; font-size: 13px; padding: 4px 6px; border-radius: 8px;
+  border: 1px solid rgba(255,255,255,.25); background: transparent; color: inherit;
+}
+.ctl-select option { color: #000; }
 .sm-only { display: none; }
 @media (max-width: 760px) { .sm-only { display: inline; } }
 .ctl.check input { width: 18px; height: 18px; accent-color: var(--accent); }
@@ -131,6 +136,11 @@ body:not(.has-score) #score { visibility: hidden; height: 0; margin: 0; }
 
 #tabScore { background: var(--paper); margin: 12px auto 40vh; max-width: 1400px; box-shadow: var(--shadow); border-radius: 4px; color: #000; }
 #tabScore[hidden], #score[hidden] { display: none; }
+/* 밴드 악보 재생 위치: 지금 마디(노란 띠)와 지금 박(파란 선). alphaTab은 모양을 페이지 CSS에 맡긴다 */
+#tabScore .at-cursor-bar { background: rgba(255, 214, 0, .25); }
+#tabScore .at-cursor-beat { background: rgba(37, 99, 235, .85); width: 3px; }
+#tabScore .at-selection div { background: rgba(37, 99, 235, .12); }
+#tabScore .at-highlight * { fill: #2563eb; stroke: #2563eb; }
 @media (max-width: 760px) { #tabScore { margin: 6px 0 40vh; border-radius: 0; } }
 .welcome { max-width: 680px; margin: 8vh auto; padding: 24px; }
 .welcome h1 { margin-top: 0; }

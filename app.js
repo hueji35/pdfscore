@@ -41,7 +41,7 @@
   const ui = {
     file: $("fileInput"),
     play: $("playBtn"), stop: $("stopBtn"), rewind: $("rewindBtn"),
-    tempo: $("tempo"), tempoOut: $("tempoOut"), zoomIn: $("zoomIn"), zoomOut: $("zoomOut"), zoomVal: $("zoomVal"),
+    tempo: $("tempo"), tempoOut: $("tempoOut"), zoomIn: $("zoomIn"), zoomOut: $("zoomOut"), zoomVal: $("zoomVal"), barsPerRow: $("barsPerRow"),
     autoScroll: $("autoScroll"), unroll: $("unroll"), partsBtn: $("partsBtn"), partList: $("partList"),
     seek: $("seek"), timeCur: $("timeCur"), timeTotal: $("timeTotal"),
     wrap: $("scoreWrap"), score: $("score"), welcome: $("welcome"),
@@ -1525,6 +1525,15 @@
   }
   ui.zoomIn.onclick = () => setZoom(state.zoom + 0.1);
   ui.zoomOut.onclick = () => setZoom(state.zoom - 0.1);
+
+  // 밴드 악보의 한 줄 마디 수 (0 = 자동). 설정은 기억해 둔다
+  const BARS_KEY = "pdfscore.barsPerRow";
+  try { const v = localStorage.getItem(BARS_KEY); if (v && [...ui.barsPerRow.options].some(o => o.value === v)) ui.barsPerRow.value = v; } catch { /* 저장소 사용 불가 */ }
+  tab.setBarsPerRow(+ui.barsPerRow.value || 0);
+  ui.barsPerRow.onchange = () => {
+    try { localStorage.setItem(BARS_KEY, ui.barsPerRow.value); } catch { /* 저장소 사용 불가 */ }
+    tab.setBarsPerRow(+ui.barsPerRow.value || 0);
+  };
 
   ui.partsBtn.onclick = () => {
     document.body.classList.toggle("parts-hidden");

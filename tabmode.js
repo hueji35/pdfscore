@@ -11,7 +11,7 @@ window.createTabMode = function (h) {
   ui.wrap.appendChild(host);
 
   let api = null, tracks = [], parts = [], playing = false, posMs = 0, endMs = 0, ready = false;
-  let rate = 1, zoom = 1, autoScroll = true;
+  let rate = 1, zoom = 1, autoScroll = true, barsPerRow = -1;
   let unroll = false, original = null, keep = null; // 원래 악보와, 다시 그릴 때 이어 받을 파트 설정
 
   function settings() {
@@ -23,7 +23,8 @@ window.createTabMode = function (h) {
         useWorkers: location.protocol !== "file:", // file:// 에서는 Worker를 만들 수 없음
         engine: "svg",
       },
-      display: { scale: zoom, layoutMode: AT.LayoutMode.Page },
+      // stretchForce: 마디를 줄 너비에 맞춰 늘리는 정도. 기본값(1)은 마디가 넓어 한 줄에 몇 마디 안 들어간다
+      display: { scale: zoom, layoutMode: AT.LayoutMode.Page, stretchForce: 0.6, barsPerRow },
       player: {
         playerMode: AT.PlayerMode.EnabledSynthesizer,
         soundFont: base + "soundfont/sonivox.sf2",
@@ -257,6 +258,14 @@ window.createTabMode = function (h) {
     stop() { if (api) api.stop(); },
     seekRatio(r) { if (api && endMs) api.timePosition = r * endMs; },
     setRate(r) { rate = r; if (api) api.playbackSpeed = r; },
+    /** 한 줄 마디 수 (0이면 자동) */
+    setBarsPerRow(n) {
+      barsPerRow = n > 0 ? n : -1;
+      if (!api) return;
+      api.settings.display.barsPerRow = barsPerRow;
+      api.updateSettings();
+      api.render();
+    },
     setZoom(z) {
       zoom = z;
       if (!api) return;
