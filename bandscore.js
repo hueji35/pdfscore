@@ -782,6 +782,36 @@ export function parseStdStaff(page, staff, glyphs, verts, beams, bars, opts = {}
     }
     return ownerOf(cy) === staff;
   };
+  /**
+   * 잇단음 숫자의 소속 보표: 브래킷 끝 갈고리가 위로 꺾이면(└3┘) 위쪽 음을, 아래로 꺾이면(┌3┐) 아래쪽 음을 묶는다.
+   * 갈고리가 없으면 가까운 보표
+   */
+  function tupletOwner(q) {
+    const cy = (q.bbox[1] + q.bbox[3]) / 2, th = q.bbox[3] - q.bbox[1];
+    const hl = page.rects.filter(r => r.y1 - r.y0 < 1.2 && r.x1 - r.x0 > 1.5 && Math.abs((r.y0 + r.y1) / 2 - cy) < th * 0.8);
+    const L = hl.filter(r => r.x1 <= q.bbox[0] + 1 && q.bbox[0] - r.x1 < 4).sort((a, b) => b.x1 - a.x1)[0];
+    const R = hl.filter(r => r.x0 >= q.bbox[2] - 1 && r.x0 - q.bbox[2] < 4).sort((a, b) => a.x0 - b.x0)[0];
+    let dir = 0;
+    for (const [line, x] of [[L, L?.x0], [R, R?.x1]]) {
+      if (!line) continue;
+      const ly = (line.y0 + line.y1) / 2;
+      const hook = page.rects.find(r => r.x1 - r.x0 < 1.2 && r.y1 - r.y0 > 2 && Math.abs((r.x0 + r.x1) / 2 - x) < 1.2 && (Math.abs(r.y0 - ly) < 1 || Math.abs(r.y1 - ly) < 1));
+      if (hook) dir += (hook.y0 + hook.y1) / 2 < ly ? -1 : 1;
+    }
+    // 기울어진 브래킷은 선이 남지 않으므로 숫자 양옆의 짧은 세로 갈고리만으로 본다
+    if (dir === 0) {
+      const hooks = page.rects.filter(r => r.x1 - r.x0 < 1.2 && r.y1 - r.y0 > 2 && r.y1 - r.y0 < g * 1.6 &&
+        r.x1 > q.bbox[0] - g * 6 && r.x0 < q.bbox[2] + g * 6 && r.y1 > q.bbox[1] - 3 && r.y0 < q.bbox[3] + 3);
+      const left = hooks.some(r => r.x1 < q.bbox[0]), right = hooks.some(r => r.x0 > q.bbox[2]);
+      if (left && right) dir = Math.sign(hooks.reduce((a, r) => a + (r.y0 + r.y1) / 2, 0) / hooks.length - cy);
+    }
+    if (dir === 0) return ownerOf(cy);
+    // 갈고리 쪽(위 또는 아래)에서 가장 가까운 보표
+    const side = allStaves.filter(st => dir < 0 ? st.top < cy : st.bottom > cy);
+    if (!side.length) return ownerOf(cy);
+    const best = side.reduce((b, st) => distTo(st, cy) < distTo(b, cy) ? st : b);
+    return Math.abs(best.top - staff.top) < 0.5 && Math.abs(best.x0 - staff.x0) < 0.5 ? staff : best;
+  }
   /** 머리와 보표 사이 칸마다 덧줄(짧은 가로선)이 있는가 */
   function ledgersTo(st, h) {
     const cy = cyOf(h), ys = [];
@@ -869,10 +899,9 @@ export function parseStdStaff(page, staff, glyphs, verts, beams, bars, opts = {}
   for (const q of near) {
     const d = { rest4: 4, rest8: 8, rest16: 16, rest32: 32 }[q.cls];
     const cy = (q.bbox[1] + q.bbox[3]) / 2;
-    // 높은 음 빔 묶음 사이의 쉼표는 오선 위로 올라가 찍힌다 — 오선 밖으로 1칸 넘게 벗어난 쉼표는 빔 묶음 사이에 있을 때만
-    const inBeams = beams.some(b => b.x0 < q.bbox[0] && b.x1 > q.bbox[2] && b.y0 > staff.top - g * 6 && b.y1 < staff.bottom + g * 6);
-    const reach = inBeams ? 3 : 2; // 2성부의 아래·위 성부 쉼표는 오선 밖 1~2칸에 찍힌다
-    if (d && cy > staff.top - g * reach && cy < staff.bottom + g * reach && ownerOf(cy) === staff)
+    // 2성부의 위·아래 성부 쉼표나 높은 음 사이의 쉼표는 오선 밖 몇 칸에 찍힌다 (이웃 보표에 더 가까운 쉼표는 제외,
+    // 다른 성부 몫으로 따로 적힌 쉼표는 아래에서 마디 길이를 보고 정리)
+    if (d && cy > staff.top - g * 4 && cy < staff.bottom + g * 4 && ownerOf(cy) === staff)
       events.push({ x: q.bbox[0], x1: q.bbox[2], cy, dur: d, dots: 0, rest: true, notes: [], voice: cy < (staff.top + staff.bottom) / 2 - g ? 1 : cy > (staff.top + staff.bottom) / 2 + g ? 2 : 0 });
   }
   for (const r of rectRests(page, staff, verts)) events.push({ ...r, x1: r.x + 2 });
@@ -895,10 +924,10 @@ export function parseStdStaff(page, staff, glyphs, verts, beams, bars, opts = {}
   }
   // 셋잇단
   // 드럼 아래 성부의 셋잇단 숫자는 오선에서 조금 더 멀리 찍힌다 (건반은 보표 간격이 좁아 이웃 보표 것을 잡으므로 드럼만)
-  const tupReach = opts.drums ? 9 : 5;
+  const tupReach = opts.drums ? 9 : 6; // 덧줄 음 아래·위의 숫자는 멀리 찍힌다. 소속은 tupletOwner가 가린다
   for (const t of glyphs.filter(q => /^tuplet\d$/.test(q.cls || "") && q.x > staff.x0 - 2 && q.x < staff.x1 + 2 &&
     (q.bbox[1] + q.bbox[3]) / 2 > staff.top - g * tupReach && (q.bbox[1] + q.bbox[3]) / 2 < staff.bottom + g * tupReach &&
-    (opts.drums || ownerOf((q.bbox[1] + q.bbox[3]) / 2) === staff))) markTuplet(events, t, glyphs, page.rects); // 두 보표 사이의 숫자는 가까운 보표 것 (드럼은 위아래로 멀리 찍혀 예외)
+    (opts.drums || tupletOwner(q) === staff))) markTuplet(events, t, glyphs, page.rects); // 두 보표 사이의 숫자는 가까운 보표 것 (드럼은 위아래로 멀리 찍혀 예외)
   // 임시표(마디 안에서 같은 음에 계속 적용) + 조표
   const accs = near.filter(q => q.cls === "sharp" || q.cls === "flat" || q.cls === "natural");
   const keyAlter = {};
@@ -1463,9 +1492,14 @@ export function splitVoices(m, full) {
   const cuts = [...new Set(notes.map(lowY))].sort((p, q) => p - q);
   for (const c of cuts) {
     const up = notes.filter(e => lowY(e) <= c), down = notes.filter(e => lowY(e) > c);
-    if (!up.length || !down.length || Math.min(...down.map(highY)) <= c) continue;
+    if (!up.length || !down.length) continue; // 아래 성부 화음의 윗음이 위 성부보다 높을 수도 있다
+    // 쉼표는 높이가 가까운 성부에
+    const mean = v => v.reduce((a, e) => a + (lowY(e) + highY(e)) / 2, 0) / v.length;
+    const mu = mean(up), md = mean(down);
+    const u2 = [...up, ...rests.filter(r => r.cy !== undefined && Math.abs(r.cy - mu) < Math.abs(r.cy - md))];
+    const d2 = [...down, ...rests.filter(r => r.cy !== undefined && Math.abs(r.cy - mu) >= Math.abs(r.cy - md))];
     const exact = v => Math.abs(measureLength(v) - full) < 1e-6;
-    if (fits(up, down) && (exact(up) || exact(down))) return { 1: up, 2: down };
+    if (fits(u2, d2) && (exact(u2) || exact(d2))) return { 1: u2, 2: d2 };
   }
   return null;
 }
