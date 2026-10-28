@@ -854,7 +854,7 @@ export function parseStdStaff(page, staff, glyphs, verts, beams, bars, opts = {}
     const cy = (q.bbox[1] + q.bbox[3]) / 2;
     // 높은 음 빔 묶음 사이의 쉼표는 오선 위로 올라가 찍힌다 — 오선 밖으로 1칸 넘게 벗어난 쉼표는 빔 묶음 사이에 있을 때만
     const inBeams = beams.some(b => b.x0 < q.bbox[0] && b.x1 > q.bbox[2] && b.y0 > staff.top - g * 6 && b.y1 < staff.bottom + g * 6);
-    const reach = inBeams ? 3 : 1;
+    const reach = inBeams ? 3 : 2; // 2성부의 아래·위 성부 쉼표는 오선 밖 1~2칸에 찍힌다
     if (d && cy > staff.top - g * reach && cy < staff.bottom + g * reach && ownerOf(cy) === staff)
       events.push({ x: q.bbox[0], x1: q.bbox[2], cy, dur: d, dots: 0, rest: true, notes: [], voice: cy < (staff.top + staff.bottom) / 2 - g ? 1 : cy > (staff.top + staff.bottom) / 2 + g ? 2 : 0 });
   }
@@ -972,6 +972,15 @@ export function parseStdStaff(page, staff, glyphs, verts, beams, bars, opts = {}
       }
     });
   }
+  // 다른 성부 몫으로 오선 밖에 따로 적힌 쉼표: 빼면 마디 길이가 꼭 맞을 때만 뺀다
+  measures.forEach((m, i) => {
+    if (opts.drums || measureLength(m) <= fullOf(i) + 1e-6) return;
+    // 위 성부 몫(오선 위)과 아래 성부 몫(오선 아래)을 따로 빼 본다
+    for (const outside of [e => e.cy < staff.top - g * 0.5, e => e.cy > staff.bottom + g * 0.5]) {
+      const keep = m.filter(e => !(e.rest && e.cy !== undefined && outside(e)));
+      if (keep.length < m.length && Math.abs(measureLength(keep) - fullOf(i)) < 1e-6) { m.splice(0, m.length, ...keep); break; }
+    }
+  });
   measures.forEach((m, i) => { if (!opts.drums && !dropParenAlt(m, bigParens, fullOf(i)) && !m.some(e => e.voice === 2) && !splitVoices(m, fullOf(i))) fixOverfull(m, bigParens, fullOf(i)); });
   measures.forEach((m, i) => fillAmbiguous(m, edges[i + 1], fullOf(i)));
   // 8va: "8va" 글자부터 점선 끝까지, 바로 아래 보표의 음을 한 옥타브 위로
