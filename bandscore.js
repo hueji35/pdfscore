@@ -1332,6 +1332,72 @@ export function parseBandScore(pages) {
   return main;
 }
 
+/**
+ * TAB 위 오선보의 음높이({ d: 온음계 번호(C0 = 0), alt: 임시표 }, 높은 음부터)를 TAB 박에 적어 둔다.
+ * TAB은 같은 프렛인데 오선보 음높이가 바뀌면 암(트레몰로 암)이나 초킹으로 음을 올리고 내린 것이다
+ */
+function markStdPitch(measures, staff, glyphs) {
+  const g = staff.gap;
+  // 마름모 머리(하모닉스)는 꼭짓점 4개짜리 도형
+  const diamond = q => !q.cls && q.segs.length === 4 && q.segs.map(x => x.op).join("") === "0111" &&
+    q.bbox[3] - q.bbox[1] > g * 1.1 && q.bbox[3] - q.bbox[1] < g * 1.7 && q.bbox[2] - q.bbox[0] > g * 1.1 && q.bbox[2] - q.bbox[0] < g * 2;
+  const heads = glyphs.filter(q => q.bbox[1] > staff.top - g * 5 && q.bbox[3] < staff.bottom + g * 5 &&
+    (/^head_(black|half|whole|x)$/.test(q.cls || "") || diamond(q)));
+  const accs = glyphs.filter(q => q.cls === "sharp" || q.cls === "flat" || q.cls === "natural");
+  const accY = q => q.cls === "flat" ? q.bbox[3] - g * 0.68 : (q.bbox[1] + q.bbox[3]) / 2;
+  const ALT = { sharp: 1, flat: -1, natural: 0 };
+  const base = clefOf(staff, glyphs) === "F" ? 18 : 30; // 맨 아래 줄: 낮은음자리표 G2, 높은음자리표 E4
+  for (const m of measures) {
+    const held = new Map(); // 마디 안에서 앞의 임시표가 이어진다
+    for (const e of [...m].sort((a, b) => a.x - b.x)) {
+      if (e.rest || !e.notes?.length) continue;
+      const hs = heads.filter(q => (q.bbox[0] + q.bbox[2]) / 2 > e.x - 2.5 && (q.bbox[0] + q.bbox[2]) / 2 < e.x + 3);
+      if (!hs.length) continue;
+      const steps = hs.map(q => {
+        const cy = (q.bbox[1] + q.bbox[3]) / 2;
+        const d = Math.round((staff.bottom - cy) / (g / 2)) + base;
+        const a = accs.find(x => x.bbox[2] < q.bbox[0] + 0.3 && q.bbox[0] - x.bbox[2] < 7 && Math.abs(accY(x) - cy) < g * 0.35);
+        if (a) held.set(d, ALT[a.cls]);
+        return { d, alt: held.get(d) };
+      });
+      e.stdSteps = steps.filter((x, k) => steps.findIndex(y => y.d === x.d) === k).sort((a, b) => b.d - a.d);
+    }
+  }
+}
+
+/** 붙임줄로 이어진 같은 음인데 오선보 음높이가 오르내리면 음높이 변화(e.whammy = [시작, 끝] 반음)를 붙인다 */
+function applyWhammy(part, bars) {
+  const SCALE = [0, 2, 4, 5, 7, 9, 11], LET = "CDEFGAB";
+  const semis = ({ d, alt }, key) => {
+    const l = LET[d % 7];
+    const ka = key > 0 && KEY_SHARPS.slice(0, key).includes(l) ? 1 : key < 0 && KEY_FLATS.slice(0, -key).includes(l) ? -1 : 0;
+    return Math.floor(d / 7) * 12 + SCALE[d % 7] + (alt ?? ka);
+  };
+  const open = (TUNINGS[part.strings] || TUNINGS[6]).split(" ").map(t => (+t.slice(1) + 1) * 12 + SCALE[LET.indexOf(t[0].toUpperCase())]);
+  const HARM = { 12: 12, 7: 19, 5: 24, 4: 28, 9: 28 };
+  const tabPc = n => ((open[n.string - 1] + (n.harmonic ? HARM[n.fret] ?? n.fret : n.fret)) % 12 + 12) % 12;
+  const evs = [];
+  part.measures.forEach((m, i) => { for (const e of [...m].sort((a, b) => a.x - b.x)) if (!e.rest && e.notes?.length) evs.push({ e, key: bars[i]?.key || 0 }); });
+  for (let i = 0; i < evs.length;) {
+    let j = i + 1;
+    while (j < evs.length && evs[j].e.notes.every(n => n.tie)) j++;
+    const chain = evs.slice(i, j);
+    i = j;
+    const std = chain.map(c => c.e.stdSteps ? c.e.stdSteps.map(x => semis(x, c.key)) : null);
+    const tops = std.map(v => v && v[0]);
+    if (chain.length < 2 || tops.filter(t => t !== null).length < 2 || tops[0] === null) continue;
+    // 기준(암을 쓰지 않은 음높이): 음이름이 모두 TAB 음과 같은 오선보 화음
+    const pcs = chain[0].e.notes.map(tabPc);
+    const k0 = std.findIndex(v => v && v.every(t => pcs.includes(t % 12)));
+    const ref = tops[k0 < 0 ? 0 : k0];
+    let last = 0;
+    const off = tops.map(t => (last = t === null ? last : t - ref));
+    // 옥타브 차이는 표기(8va 등) 차이로 본다
+    if (off.every(v => v === 0) || off.some(v => Math.abs(v) >= 12)) continue;
+    chain.forEach((c, k) => { c.e.whammy = [off[k], off[k + 1] ?? off[k]]; });
+  }
+}
+
 function parseSystems(list) {
   const parts = [];      // 파트 순서는 첫 단 기준
   const bars = [];
@@ -1371,7 +1437,11 @@ function parseSystems(list) {
       const rdots = markRepeatDots(sys, pg.glyphs, verts);
       const nav = navigationMarks(sys, pg.glyphs, edges, rdots);
       const parsed = layout.map(p => {
-        if (p.kind === "guitar" || p.kind === "bass") return parseTabStaff(pg, sys.staves[p.tab], pg.glyphs, verts, beams, sb, fulls, p.std != null ? smallHeadXs(sys.staves[p.std], pg.glyphs) : []);
+        if (p.kind === "guitar" || p.kind === "bass") {
+          const ms = parseTabStaff(pg, sys.staves[p.tab], pg.glyphs, verts, beams, sb, fulls, p.std != null ? smallHeadXs(sys.staves[p.std], pg.glyphs) : []);
+          if (p.std != null) markStdPitch(ms, sys.staves[p.std], pg.glyphs);
+          return ms;
+        }
         if (p.kind === "piano") {
           const up = parseStdStaff(pg, sys.staves[p.std], pg.glyphs, verts, beams, sb, { others: pageStaves, fulls });
           const lo = parseStdStaff(pg, sys.staves[p.lower], pg.glyphs, verts, beams, sb, { others: pageStaves, fulls });
@@ -1461,6 +1531,7 @@ function parseSystems(list) {
       if (src) { n.tie = true; if (src.alter !== undefined) n.alter = src.alter; }
     }
   });
+  for (const p of parts) if (p.kind === "guitar" || p.kind === "bass") applyWhammy(p, bars);
   return { parts, bars, report };
 }
 
@@ -1674,6 +1745,7 @@ function beatTex(e, kind, strings = 6, perc = false) {
   if (e.dots) fx.push(e.dots === 2 ? "dd" : "d");
   if (e.tuplet) fx.push(`tu ${e.tuplet}`);
   if (e.tremolo && !e.rest) fx.push("tp 16");
+  if (kind === "tab" && e.whammy && (e.whammy[0] || e.whammy[1]) && !e.rest) fx.push(`tb (${e.whammy[0] * 2} ${e.whammy[1] * 2})`); // 4분의 1음 단위
   // 음표 효과({t})와 박 효과가 함께 있을 때 헷갈리지 않도록 화음 괄호로 감싼다
   if (fx.length && body !== "r" && !body.startsWith("(")) body = `(${body})`;
   return `:${e.dur} ${body}${fx.length ? `{${fx.join(" ")}}` : ""}`;
