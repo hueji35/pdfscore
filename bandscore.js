@@ -1214,7 +1214,7 @@ export function parseBandScore(pages) {
         main.parts.push({ ...p, measures: ms, extra: true });
       }
       const missing = map.filter(v => v < 0).length;
-      main.report.push(`16쪽부터의 부록 ${extra.parts.length}파트를 본편에 맞춰 붙였습니다` +
+      main.report.push(`${(extra.bars[0]?.page ?? 0) + 1}쪽부터의 부록 ${extra.parts.length}파트를 본편에 맞춰 붙였습니다` +
         (missing ? ` (부록에 없는 ${missing}마디는 쉼표로 둠)` : "") + ".");
     } else {
       main.report.push(`보표 구성이 다른 부분(${rest.length}단, ${extra.bars.length}마디)은 본편(${main.bars.length}마디)과 맞출 기준점이 없어 뺐습니다.`);
