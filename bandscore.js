@@ -938,15 +938,32 @@ export function parseStdStaff(page, staff, glyphs, verts, beams, bars, opts = {}
     (opts.drums || tupletOwner(q) === staff))) markTuplet(events, t, glyphs, page.rects); // 두 보표 사이의 숫자는 가까운 보표 것 (드럼은 위아래로 멀리 찍혀 예외)
   // 임시표(마디 안에서 같은 음에 계속 적용) + 조표
   const accs = near.filter(q => q.cls === "sharp" || q.cls === "flat" || q.cls === "natural");
+  // 임시표가 가리키는 높이: 샵·제자리표는 가운데, 플랫은 아래쪽 둥근 몸통 (가운데로 재면 3도 위 음에 붙는다)
+  const accY = q => q.cls === "flat" ? q.bbox[3] - g * 0.68 : (q.bbox[1] + q.bbox[3]) / 2;
   const keyAlter = {};
   (key > 0 ? KEY_SHARPS.slice(0, key) : KEY_FLATS.slice(0, -key)).forEach(s => (keyAlter[s] = key > 0 ? 1 : -1));
   const edges = measureEdges(staff, bars);
   const measures = [];
+  let curKey = key;
   for (let i = 0; i < edges.length - 1; i++) {
     const m = events.filter(e => e.x > edges[i] + 0.5 && e.x < edges[i + 1] - 0.5);
+    // 단 중간의 조표 바꿈: 마디 첫 음 앞에 음에 붙지 않은 샵·플랫·제자리표가 2개 이상
+    if (i > 0) {
+      const notes = m.filter(e => !e.rest).flatMap(e => e.notes);
+      const firstX = Math.min(...notes.map(n => n.x0), ...m.filter(e => e.rest).map(e => e.x - g), edges[i + 1]);
+      const sig = accs.filter(q => q.x > edges[i] && q.bbox[2] < firstX - 0.3 &&
+        !notes.some(n => q.bbox[2] < n.x0 + 0.3 && n.x0 - q.bbox[2] < 7 && Math.abs((q.bbox[1] + q.bbox[3]) / 2 - n.cy) < g * 0.6));
+      if (sig.length >= 2) {
+        const sh = sig.filter(q => q.cls === "sharp").length, fl = sig.filter(q => q.cls === "flat").length;
+        curKey = sh ? sh : -fl;
+        for (const s of Object.keys(keyAlter)) delete keyAlter[s];
+        (curKey > 0 ? KEY_SHARPS.slice(0, curKey) : KEY_FLATS.slice(0, -curKey)).forEach(s => (keyAlter[s] = curKey > 0 ? 1 : -1));
+      }
+    }
+    m.key = curKey;
     const local = {};
     for (const e of m) for (const n of e.notes) {
-      const a = accs.find(q => q.bbox[2] < n.x0 + 0.3 && n.x0 - q.bbox[2] < 7 && Math.abs((q.bbox[1] + q.bbox[3]) / 2 - n.cy) < g * 0.6 && q.x > edges[i]);
+      const a = accs.find(q => q.bbox[2] < n.x0 + 0.3 && n.x0 - q.bbox[2] < 7 && Math.abs(accY(q) - n.cy) < g * 0.35 && q.x > edges[i]);
       const k = n.step + n.oct;
       if (a) local[k] = a.cls === "sharp" ? 1 : a.cls === "flat" ? -1 : 0;
       n.alter = local[k] ?? keyAlter[n.step] ?? 0;
@@ -1329,7 +1346,7 @@ function parseSystems(list) {
         if (p.kind === "piano") {
           const up = parseStdStaff(pg, sys.staves[p.std], pg.glyphs, verts, beams, sb, { others: pageStaves, fulls });
           const lo = parseStdStaff(pg, sys.staves[p.lower], pg.glyphs, verts, beams, sb, { others: pageStaves, fulls });
-          const both = up.map((m, i) => { const r = [...m.map(e => ({ ...e, staff: 0 })), ...(lo[i] || []).map(e => ({ ...e, staff: 1 }))]; r.repeatOf2 = m.repeatOf2; r.x0 = m.x0; r.x1 = m.x1; return r; });
+          const both = up.map((m, i) => { const r = [...m.map(e => ({ ...e, staff: 0 })), ...(lo[i] || []).map(e => ({ ...e, staff: 1 }))]; r.repeatOf2 = m.repeatOf2; r.x0 = m.x0; r.x1 = m.x1; r.key = m.key; return r; });
           both.key = up.key;
           return both;
         }
@@ -1374,7 +1391,7 @@ function parseSystems(list) {
           const rehearsal = r === 0 && pg.glyphs.some(q => q.cls === "rbox" && q.bbox[3] < sys.staves[0].top && q.bbox[3] > sys.staves[0].top - 32 &&
             (q.bbox[0] + q.bbox[2]) / 2 > edges[i] - 4 && (q.bbox[0] + q.bbox[2]) / 2 < edges[i + 1] - 4);
           // 조표: 이 단의 첫 오선보(보컬·건반) 기준
-          const keyOf = parsed.find((m, k) => layout[k].kind !== "guitar" && layout[k].kind !== "bass" && layout[k].kind !== "drums" && m.key !== undefined)?.key;
+          const keyOf = parsed.map((m, k) => layout[k].kind !== "guitar" && layout[k].kind !== "bass" && layout[k].kind !== "drums" ? m[i]?.key ?? m.key : undefined).find(k => k !== undefined);
           bars.push({ ts: tsList[i], page: pi, x: edges[i], nav: r === 0 ? nav[i] || {} : {}, multiRest: restN[i] > 1, keyChange: keyMark >= 2, rehearsal, key: keyOf });
           layout.forEach((p, k) => targets[k].measures.push(r === 0 ? barRest(parsed[k][i] || [], fulls[i]) : []));
           parts.forEach(pp => { while (pp.measures.length < bars.length) pp.measures.push([]); });
