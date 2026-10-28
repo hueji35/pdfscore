@@ -440,6 +440,16 @@ export function parseTabStaff(page, staff, glyphs, verts, beams, bars, fulls = [
     m.x0 = a; m.x1 = b;
     measures.push(m);
   }
+  // 기둥 없는 "//"가 빈 마디에 홀로 있으면 온음표 리듬 빗금 (앞 화음을 마디 내내)
+  const wholeSlash = new Set();
+  for (const q of mine.filter(q => q.cls === "repeat2" && !hollowSlash.has(q))) {
+    const cx = (q.bbox[0] + q.bbox[2]) / 2, i = edges.findIndex((x, k) => k < edges.length - 1 && cx > x && cx < edges[k + 1]);
+    // 마디 가운데의 "//"는 박 반복, 마디줄 위의 "//"는 두 마디 반복 기호. 온음표 빗금은 마디줄 바로 뒤에 붙는다
+    if (i < 0 || cx - edges[i] < g * 1.5 || cx - edges[i] > (edges[i + 1] - edges[i]) * 0.3 || measures[i].some(e => !e.rest) || events.some(e => e.stem && Math.abs(e.stem.x - cx) < 2.5)) continue;
+    const full = fulls[i] ?? 1;
+    measures[i].splice(0, measures[i].length, { x: cx, x1: q.bbox[2], dur: full >= 1 ? 1 : full >= 0.5 ? 2 : 4, dots: 0, notes: [] });
+    wholeSlash.add(q);
+  }
   let prev = null;
   for (const m of measures) for (const e of m) {
     if (!e.rest && e.notes.length === 0) { e.notes = prev ? prev.map(n => ({ ...n, tie: false })) : []; e.repeatPrev = true; }
@@ -447,12 +457,25 @@ export function parseTabStaff(page, staff, glyphs, verts, beams, bars, fulls = [
   }
   // 기둥에 겹친 "//" = 트레몰로(그 음 길이 동안 16분음표로 연타). 그 밖의 "//"는 박 반복 기호
   const signs = [];
-  for (const q of mine.filter(q => (q.cls === "repeat1" || q.cls === "repeat2") && !hollowSlash.has(q))) {
+  for (const q of mine.filter(q => (q.cls === "repeat1" || q.cls === "repeat2") && !hollowSlash.has(q) && !wholeSlash.has(q))) {
     const cx = (q.bbox[0] + q.bbox[2]) / 2;
     const ev = q.cls === "repeat2" && events.find(e => e.stem && Math.abs(e.stem.x - cx) < 2.5);
     if (ev) ev.tremolo = 16; else signs.push(q);
   }
   applyRepeatSigns(measures, edges, signs);
+  // 곡선 붙임줄: 이웃한 두 사건에 같은 줄·같은 프렛이 있고 그 사이를 잇는 납작한 곡선이 있으면 (해머링·풀링은 프렛이 달라 제외)
+  const arcs = glyphs.filter(q => !q.cls && q.bbox[2] - q.bbox[0] > 3 && q.bbox[2] - q.bbox[0] > (q.bbox[3] - q.bbox[1]) * 2.5 && q.bbox[3] - q.bbox[1] < (q.bbox[2] - q.bbox[0] > 40 ? g * 2 : g * 1.3) &&
+    q.x > staff.x0 && q.x < staff.x1 && q.bbox[1] > staff.top - g * 3 && q.bbox[3] < staff.bottom + g * 3);
+  const played = measures.flat().filter(e => !e.rest && (e.notes.length || e.repeatPrev)).sort((a, b) => a.x - b.x);
+  const same = (n, o) => o.string === n.string && o.fret === n.fret && !o.dead && !n.dead;
+  played.forEach((b, i) => {
+    const a = played.slice(0, i).reverse().find(e => !e.voice || !b.voice || e.voice === b.voice);
+    const reach = q => q.bbox[2] < b.x + 3 && b.x - q.bbox[2] < g * 3;
+    if (a && arcs.some(q => reach(q) && q.bbox[0] > a.x - g && q.bbox[0] < (a.x1 ?? a.x) + g * 2.5)) {
+      b.tiePrev = true; // 머리 없는 사건은 단을 모은 뒤 앞 화음을 받을 때 잇는다
+      for (const n of b.notes) if (a.notes.some(o => same(n, o))) n.tie = true;
+    } else if (!a && arcs.some(q => reach(q) && q.bbox[0] < b.x - g)) { b.tieIn = true; for (const n of b.notes) n.tieIn = true; } // 앞 단에서 이어짐
+  });
   // 일부 판형의 괄호는 기호가 아니라 세로로 긴 곡선(붙임줄과 같은 경로)으로 그려진다
   const tallArcs = glyphs.filter(q => !q.cls && q.segs.map(z => z.op).join("") === "02121" && q.bbox[3] - q.bbox[1] > g * 3 &&
     q.bbox[2] - q.bbox[0] < g && q.x > staff.x0 && q.x < staff.x1 && q.bbox[1] < staff.bottom && q.bbox[3] > staff.top);
@@ -991,7 +1014,7 @@ export function parseStdStaff(page, staff, glyphs, verts, beams, bars, opts = {}
   // 붙임줄: 다음 사건에 같은 음이 있고, 그 사이에 둥근 곡선(사전에 없는 납작한 기호)이 있으면
   // 마디를 넘는 긴 붙임줄은 곡선이 조금 더 높다
   const arcs = glyphs.filter(q => !q.cls && q.bbox[2] - q.bbox[0] > 3 && q.bbox[3] - q.bbox[1] < (q.bbox[2] - q.bbox[0] > 40 ? g * 2 : g * 1.3) &&
-    q.x > staff.x0 && q.x < staff.x1 && q.bbox[1] > staff.top - g * 4 && q.bbox[3] < staff.bottom + g * 4);
+    q.x > staff.x0 && q.x < staff.x1 && q.bbox[1] > staff.top - g * 5 && q.bbox[3] < staff.bottom + g * 5);
   const flat = measures.flat().filter(e => !e.rest).sort((a, b) => a.x - b.x);
   for (let i = 0; i + 1 < flat.length; i++) {
     const a = flat[i], b = flat.slice(i + 1).find(e => e.voice === a.voice || !e.voice || !a.voice);
@@ -1002,6 +1025,12 @@ export function parseStdStaff(page, staff, glyphs, verts, beams, bars, opts = {}
       const arc = arcs.find(q => q.bbox[0] > a.x1 - 2 && q.bbox[2] < b.x + 3 && Math.abs((q.bbox[1] + q.bbox[3]) / 2 - n.cy) < (q.bbox[2] - q.bbox[0] > 40 ? g * 2 : g * 1.6));
       if (arc) { n.tie = true; n.alter = src.alter; } // 붙임줄로 이어진 음은 마디를 넘어도 앞 음의 임시표 그대로
     }
+  }
+  // 단 첫 음 왼쪽에서 시작하는 붙임줄 = 앞 단 끝 음에서 이어짐 (단을 모은 뒤 linkSystemTies가 잇는다)
+  for (const b of flat) {
+    if (flat.some(a => a !== b && a.x < b.x - 1 && (a.voice === b.voice || !a.voice || !b.voice))) continue;
+    for (const n of b.notes)
+      if (arcs.some(q => q.bbox[2] < b.x + 3 && b.x - q.bbox[2] < g * 3 && q.bbox[0] < b.x - g && Math.abs((q.bbox[1] + q.bbox[3]) / 2 - n.cy) < g * 1.6)) n.tieIn = true;
   }
   const signs = near.filter(q => q.cls === "repeat1" || q.cls === "repeat2").filter(q => !events.some(e => e.stem && Math.abs(e.stem.x - (q.bbox[0] + q.bbox[2]) / 2) < 2.5));
   applyRepeatSigns(measures, edges, signs);
@@ -1416,6 +1445,22 @@ function parseSystems(list) {
       p.measures[i + 1] = cp(p.measures[i - 1]);
     }
   });
+  // 단을 넘는 붙임줄: 단 첫 음(tieIn)을 앞 마디의 마지막 같은 음에 잇는다
+  const sameNote = (n, o) => n.string !== undefined ? o.string === n.string && o.fret === n.fret : o.step === n.step && o.oct === n.oct;
+  for (const p of parts) p.measures.forEach((m, i) => {
+    // 단 첫머리의 리듬 빗금(머리 없는 기둥, "//")은 앞 단 마지막 화음을 되풀이
+    for (const e of m) if (e.repeatPrev && !e.notes.length) {
+      const last = p.measures.slice(0, i).reverse().map(pm => pm.filter(a => !a.rest && a.notes.length).sort((a, b) => b.x - a.x)[0]).find(Boolean);
+      if (last) e.notes = last.notes.map(n => ({ ...n, tie: !!e.tiePrev, tieIn: !!e.tieIn }));
+    }
+    for (const e of m) for (const n of e.notes || []) {
+      if (!n.tieIn) continue;
+      delete n.tieIn;
+      const src = (p.measures[i - 1] || []).filter(a => !a.rest && (a.staff ?? 0) === (e.staff ?? 0)).sort((a, b) => b.x - a.x)
+        .map(a => a.notes.find(o => sameNote(n, o))).find(Boolean);
+      if (src) { n.tie = true; if (src.alter !== undefined) n.alter = src.alter; }
+    }
+  });
   return { parts, bars, report };
 }
 
@@ -1617,7 +1662,9 @@ function beatTex(e, kind, strings = 6, perc = false) {
     const ns = [...new Set(e.notes.map(n => `${n.dead ? "x" : n.fret}.${n.string}${n.tie || n.harmonic ? `{${[n.tie && "t", n.harmonic && "nh"].filter(Boolean).join(" ")}}` : ""}`))];
     body = ns.length > 1 ? `(${ns.join(" ")})` : ns[0];
   } else if (kind === "drums") {
-    const ns = [...new Set(e.notes.map(n => perc ? (n.ring ? "CrashMediumHit" : n.xhead ? "CabasaHit" : "TambourineHit") : drumArticulation(n.pos, n.xhead)))];
+    // 붙임줄은 심벌(울림을 이어감)에만. 북 종류의 곡선은 붙임줄이 아니라 다른 표시인 경우가 많다
+    const art = n => perc ? (n.ring ? "CrashMediumHit" : n.xhead ? "CabasaHit" : "TambourineHit") : drumArticulation(n.pos, n.xhead);
+    const ns = [...new Set(e.notes.map(n => art(n) + (n.tie && /Crash|Ride|Splash|China/.test(art(n)) ? "{t}" : "")))];
     body = ns.length > 1 ? `(${ns.join(" ")})` : ns[0];
   } else {
     const ns = [...new Set(e.notes.map(noteTex))]; // 같은 음이 겹쳐 적힌 경우(두 성부 유니즌) 하나로
