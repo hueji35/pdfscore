@@ -175,6 +175,19 @@
       window.pdfscore.lastTex = tex;
       throw new Error("PDF에서 읽은 악보를 정리하지 못했습니다.");
     }
+    // 부록 타악기 파트(Perc.)는 원본처럼 가운데 줄(시)에 X 머리로, 심벌은 보표 위에 ⊗로 그린다
+    // (alphaTab 기본 위치는 카바사가 보표 한참 아래, 탬버린이 세모 머리라 원본과 다르게 보인다)
+    const MF = alphaTab.model.MusicFontSymbol;
+    score.parts.forEach((p, i) => {
+      if (!p.extra || p.kind !== "drums" || !atScore.tracks[i]) return;
+      for (const a of atScore.tracks[i].percussionArticulations) {
+        const cymbal = /crash|cymbal|ride|splash|china/i.test(a.elementType);
+        a.staffLine = cymbal ? -2 : 4;
+        a.noteHeadDefault = cymbal ? MF.NoteheadCircleX : MF.NoteheadXBlack;
+        a.noteHeadHalf = cymbal ? MF.NoteheadCircleX : MF.NoteheadXHalf;
+        a.noteHeadWhole = cymbal ? MF.NoteheadCircleXWhole : MF.NoteheadXWhole;
+      }
+    });
     enterTabMode();
     tab.loadScore(atScore);
     window.pdfscore.lastTex = tex;
