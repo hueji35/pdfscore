@@ -672,6 +672,14 @@ function markTuplet(events, t, glyphs = [], rects = []) {
     const L = hl.filter(r => r.x1 <= t.bbox[0] + 1 && t.bbox[0] - r.x1 < 4).sort((a, b) => b.x1 - a.x1)[0];
     const R = hl.filter(r => r.x0 >= t.bbox[2] - 1 && r.x0 - t.bbox[2] < 4).sort((a, b) => a.x0 - b.x0)[0];
     if (L && R) br = { bbox: [L.x0, Math.min(L.y0, R.y0), R.x1, Math.max(L.y1, R.y1)] };
+    // 기울어진 브래킷은 선이 남지 않으므로 양 끝의 짧은 세로 갈고리 사이를 범위로
+    if (!br) {
+      const hooks = rects.filter(r => r.x1 - r.x0 < 1.2 && r.y1 - r.y0 > 2 && r.y1 - r.y0 < th * 1.5 &&
+        r.x1 > t.bbox[0] - 45 && r.x0 < t.bbox[2] + 45 && r.y1 > t.bbox[1] - th * 1.2 && r.y0 < t.bbox[3] + th * 1.2);
+      const hl2 = hooks.filter(r => r.x1 < t.bbox[0]).sort((a, b) => b.x0 - a.x0)[0];
+      const hr2 = hooks.filter(r => r.x0 > t.bbox[2]).sort((a, b) => a.x0 - b.x0)[0];
+      if (hl2 && hr2) br = { bbox: [hl2.x0, Math.min(hl2.y0, hr2.y0), hr2.x1, Math.max(hl2.y1, hr2.y1)] };
+    }
   }
   if (br) {
     const all = events.filter(e => !e.tuplet && e.x > br.bbox[0] - 1.5 && e.x < br.bbox[2] + 1.5);
@@ -828,7 +836,7 @@ export function parseStdStaff(page, staff, glyphs, verts, beams, bars, opts = {}
   const firstX = Math.min(...heads.map(h => h.bbox[0]), staff.x1);
   const key = opts.key ?? keyOf(staff, glyphs, firstX);
   const stems = verts.filter(v => v.w < 0.8 && v.y1 - v.y0 > g * 1.5 && v.x > staff.x0 && v.x < staff.x1 &&
-    !barXs.some(x => Math.abs(x - v.x) < 0.8) && v.y1 > staff.top - g * 6 && v.y0 < staff.bottom + g * 6);
+    !barXs.some(x => Math.abs(x - v.x) < 0.8) && v.y1 > staff.top - g * 9 && v.y0 < staff.bottom + g * 9); // 덧줄 음의 기둥은 멀리까지
   // 꼬리는 덧줄 음의 긴 기둥 끝에 달려 오선에서 멀 수 있다
   const flags = glyphs.filter(q => (q.cls === "flag" || q.cls === "flag16") && q.x > staff.x0 - 2 && q.x < staff.x1 + 2 &&
     (q.bbox[1] + q.bbox[3]) / 2 > staff.top - g * 9 && (q.bbox[1] + q.bbox[3]) / 2 < staff.bottom + g * 9);
@@ -1419,7 +1427,7 @@ function markAnacrusis(score) {
  * 길이가 맞는 성부(보통 위 성부)의 음 위치(x)→시각 표를 만들고, 다른 성부의 음은 x로 시각을 구한 뒤
  * 사이사이 빈 곳을 쉼표로 채운다 (드럼 발 성부처럼 쉼표를 생략한 표기 대응).
  */
-export function alignVoices(voices, full, x0, x1) {
+export function alignVoices(voices, full, x0, x1, sequential = false) {
   const keys = Object.keys(voices);
   const lens = Object.fromEntries(keys.map(k => [k, measureLength(voices[k])]));
   let primary = keys.find(k => Math.abs(lens[k] - full) < 1e-6) ?? keys.sort((a, b) => lens[b] - lens[a])[0];
@@ -1441,11 +1449,14 @@ export function alignVoices(voices, full, x0, x1) {
   const out = {};
   for (const k of keys) {
     if (k === primary || Math.abs(lens[k] - full) < 1e-6) { out[k] = [...voices[k]].sort((a, b) => a.x - b.x); continue; }
-    const evs = [...voices[k]].filter(e => !e.rest).sort((a, b) => a.x - b.x);
+    // 선율 성부(sequential)는 쉼표도 자리를 차지하고, 이어지는 음은 앞 음 바로 뒤에 붙인다. 드럼은 음만 x로 맞춘다
+    const evs = [...voices[k]].filter(e => sequential || !e.rest).sort((a, b) => a.x - b.x);
     const seq = [];
     let cur = 0;
     for (const e of evs) {
-      const at = snap(timeAt(e.x));
+      // 이어지는 음은 앞 음 바로 뒤에 (빠른 음형이 격자에 맞춰 흩어지지 않게). 간격이 뚜렷이 벌어질 때만 쉼표
+      const raw = timeAt(e.x);
+      const at = sequential && raw <= cur + 1 / 16 + 1e-6 ? cur : snap(raw);
       if (at > cur + 1e-6) seq.push(...restsFor(at - cur));
       if (at < cur - 1e-6) continue; // 겹치면 버림
       seq.push(e);
@@ -1500,6 +1511,52 @@ export function splitVoices(m, full) {
     const d2 = [...down, ...rests.filter(r => r.cy !== undefined && Math.abs(r.cy - mu) >= Math.abs(r.cy - md))];
     const exact = v => Math.abs(measureLength(v) - full) < 1e-6;
     if (fits(u2, d2) && (exact(u2) || exact(d2))) return { 1: u2, 2: d2 };
+  }
+  return splitByTiming(m, full);
+}
+
+/**
+ * 마지막 수단: 기둥 방향·음높이로 나눌 수 없는 2성부 (같은 성부 안에서 기둥 방향이 바뀌는 피아노 편곡 등).
+ * 이어진 짧은 음 무리는 한 덩어리로 묶고, 덩어리를 두 성부로 나누는 모든 조합 가운데
+ * 두 성부가 모두 마디 길이와 꼭 맞고, 박 위치가 가로 순서와 모순되지 않는 것을 고른다.
+ */
+function splitByTiming(m, full) {
+  // 같은 자리·같은 길이로 겹쳐 찍힌 음(옥타브로 겹친 음형 등)은 한 화음으로
+  const merged = [];
+  for (const e of [...m].sort((a, b) => a.x - b.x)) {
+    const o = !e.rest && merged.find(o => !o.rest && Math.abs(o.x - e.x) < 1 && o.dur === e.dur && (o.dots || 0) === (e.dots || 0) && (o.tuplet || 0) === (e.tuplet || 0));
+    if (o) o.notes = [...o.notes, ...e.notes];
+    else merged.push({ ...e, notes: [...e.notes] });
+  }
+  const sorted = merged;
+  const units = [];
+  for (const e of sorted) {
+    const u = units[units.length - 1], last = u && u[u.length - 1];
+    if (u && !e.rest && !last.rest && e.dur >= 16 && last.dur >= 16 && (e.stemVoice || 0) === (last.stemVoice || 0) && e.x - last.x < 16) u.push(e);
+    else units.push([e]);
+  }
+  if (units.length < 2 || units.length > 14) return null;
+  const onsets = v => { let t = 0; return [...v].sort((a, b) => a.x - b.x).map(e => { const r = { x: e.x, t }; t += evLen(e); return r; }); };
+  const consistent = (a, b) => {
+    const oa = onsets(a), ob = onsets(b);
+    for (const p of oa) for (const q of ob) {
+      if (Math.abs(p.x - q.x) < 2) { if (Math.abs(p.t - q.t) > 1e-6) return false; }
+      else if (p.x < q.x ? p.t > q.t + 1e-6 : q.t > p.t + 1e-6) return false;
+    }
+    return true;
+  };
+  const exact = v => Math.abs(measureLength(v) - full) < 1e-6;
+  const hi = v => { const ns = v.flatMap(e => e.notes.map(n => n.cy ?? 0)); return ns.reduce((x, y) => x + y, 0) / ns.length; };
+  // 두 성부 모두 꼭 맞는 조합을 먼저, 없으면 한쪽만 꼭 맞고 다른 쪽은 짧은 조합 (짧은 쪽은 출력 때 쉼표로 채움)
+  for (const strict of [true, false]) {
+    for (let mask = 1; mask < (1 << (units.length - 1)); mask++) { // 첫 덩어리는 항상 b 쪽 (대칭 제거)
+      const a = [], b = [];
+      units.forEach((u, i) => ((i > 0 && (mask >> (i - 1)) & 1) ? a : b).push(...u));
+      if (!a.some(e => !e.rest) || !b.some(e => !e.rest)) continue;
+      const ok = strict ? exact(a) && exact(b) : (exact(a) || exact(b)) && measureLength(a) <= full + 1e-6 && measureLength(b) <= full + 1e-6;
+      if (!ok || !consistent(a, b)) continue;
+      return hi(a) < hi(b) ? { 1: a, 2: b } : { 1: b, 2: a }; // 위 성부 = 평균 음이 높은 쪽
+    }
   }
   return null;
 }
@@ -1629,7 +1686,14 @@ export function toAlphaTex(score, title = "", tempo = 120) {
     const voiced = measures.map((m, i) => {
       const full = barLen(i);
       const vs = { 1: m.filter(e => (e.voice || 1) === 1), 2: m.filter(e => e.voice === 2) };
-      if (vs[1].length && vs[2].length) return alignVoices(vs, full, m.x0 ?? Math.min(...m.map(e => e.x)) - 5, m.x1 ?? Math.max(...m.map(e => e.x)) + 20);
+      if (vs[1].length && vs[2].length) {
+        // 기둥 방향 성부가 마디를 넘치면(같은 성부 안에서 기둥 방향이 바뀌는 경우) 성부를 새로 나눈다
+        if (kind !== "drums" && [vs[1], vs[2]].some(v => measureLength(v) > full + 1e-6)) {
+          const sp = splitVoices(m, full);
+          if (sp) return alignVoices(sp, full, m.x0 ?? -1e9, m.x1 ?? 1e9, true);
+        }
+        return alignVoices(vs, full, m.x0 ?? Math.min(...m.map(e => e.x)) - 5, m.x1 ?? Math.max(...m.map(e => e.x)) + 20, kind !== "drums");
+      }
       // 다른 성부용 온쉼표가 함께 적혀 넘치는 경우: 음표만으로 마디가 맞으면 그 쉼표는 뺀다
       if (measureLength(m) > full + 1e-6 && m.some(e => e.rest && e.dur === 1)) {
         const keep = m.filter(e => !(e.rest && e.dur === 1));
@@ -1637,7 +1701,7 @@ export function toAlphaTex(score, title = "", tempo = 120) {
       }
       if (kind !== "drums" && measureLength(m) > full + 1e-6) {
         const sp = splitVoices(m, full);
-        if (sp) return alignVoices(sp, full, m.x0 ?? -1e9, m.x1 ?? 1e9);
+        if (sp) return alignVoices(sp, full, m.x0 ?? -1e9, m.x1 ?? 1e9, true);
       }
       return null;
     });
