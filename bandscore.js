@@ -1413,6 +1413,7 @@ function markStdPitch(measures, staff, glyphs) {
         return { d, alt: held.get(d) };
       });
       e.stdSteps = steps.filter((x, k) => steps.findIndex(y => y.d === x.d) === k).sort((a, b) => b.d - a.d);
+      e.stdX = hs.every(q => q.cls === "head_x"); // 오선보가 × 머리 (TAB에는 숫자가 있어도)
     }
   }
 }
@@ -1447,6 +1448,12 @@ function applyWhammy(part, bars) {
     // 옥타브 차이는 표기(8va 등) 차이로 본다
     if (off.every(v => v === 0) || off.some(v => Math.abs(v) >= 12)) continue;
     chain.forEach((c, k) => { c.e.whammy = [off[k], off[k + 1] ?? off[k]]; });
+    // 음높이가 바뀌는 곳은 원본처럼 TAB 숫자를 다시 적고 곡선(해머온 표시)으로 잇는다. 소리는 붙임줄처럼 이어진다
+    for (let k = 1; k < chain.length; k++) {
+      if (off[k] === off[k - 1]) continue;
+      chain[k - 1].e.notes = chain[k - 1].e.notes.map(n => ({ ...n, hopo: true }));
+      chain[k].e.notes = chain[k].e.notes.map(n => ({ ...n, tie: false }));
+    }
   }
 }
 
@@ -1813,7 +1820,11 @@ function beatTex(e, kind, strings = 6, perc = false) {
   let body;
   if (e.rest || !e.notes.length) body = "r";
   else if (kind === "tab") {
-    const ns = [...new Set(e.notes.map(n => `${n.dead ? "x" : n.fret}.${n.string}${n.tie || n.harmonic ? `{${[n.tie && "t", n.harmonic && "nh"].filter(Boolean).join(" ")}}` : ""}`))];
+    // string: 오선보 × 머리 표시용 표지 (가져온 뒤 app.js가 × 머리로 바꾸고 지운다)
+    const ns = [...new Set(e.notes.map(n => {
+      const fx = [n.tie && "t", n.harmonic && "nh", n.hopo && "h", e.stdX && !n.dead && "string"].filter(Boolean);
+      return `${n.dead ? "x" : n.fret}.${n.string}${fx.length ? `{${fx.join(" ")}}` : ""}`;
+    }))];
     body = ns.length > 1 ? `(${ns.join(" ")})` : ns[0];
   } else if (kind === "drums") {
     // 붙임줄은 심벌(울림을 이어감)에만. 북 종류의 곡선은 붙임줄이 아니라 다른 표시인 경우가 많다

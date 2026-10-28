@@ -13,6 +13,7 @@ window.createTabMode = function (h) {
   let api = null, tracks = [], parts = [], playing = false, posMs = 0, endMs = 0, ready = false;
   let rate = 1, zoom = 1, autoScroll = true, barsPerRow = -1;
   let unroll = false, original = null, keep = null; // 원래 악보와, 다시 그릴 때 이어 받을 파트 설정
+  let fromPdf = false, armStash = null; // PDF에서 읽은 악보인지, 그림에서 숨겨 둔 암(음높이 변화)
 
   function settings() {
     const AT = alphaTab;
@@ -40,6 +41,9 @@ window.createTabMode = function (h) {
   function ensureApi() {
     if (api) return api;
     api = new alphaTab.AlphaTabApi(host, settings());
+    // 재생 데이터를 만들 때만 숨겨 둔 암을 되돌린다
+    const loadMidi = api.loadMidiForScore.bind(api);
+    api.loadMidiForScore = () => { armOn(); try { loadMidi(); } finally { armOff(api.score); } };
     api.scoreLoaded.on(score => {
       tracks = score.tracks;
       if (h.baseTempo) h.baseTempo(score.tempo || 120);
@@ -219,10 +223,33 @@ window.createTabMode = function (h) {
     return AT.model.JsonConverter.jsonToScore(JSON.stringify(o), st);
   }
 
+  /* ---------- PDF 악보의 암 ---------- */
+  // PDF 원본은 암을 오선보 음높이(× 머리·◆)로 적어 두므로, alphaTab이 그리는 암 그래프·보조 음표는 숨기고 소리에만 쓴다
+  function armOff(score) {
+    if (!fromPdf || !score || armStash) return;
+    armStash = [];
+    for (const t of score.tracks) for (const s of t.staves) for (const b of s.bars) for (const v of b.voices) for (const be of v.beats)
+      if (be.whammyBarPoints || be.isContinuedWhammy) {
+        armStash.push([be, be.whammyBarPoints, be.isContinuedWhammy]);
+        be.whammyBarPoints = null;
+        be.isContinuedWhammy = false;
+      }
+  }
+  function armOn() {
+    if (!armStash) return;
+    for (const [be, pts, cont] of armStash) { be.whammyBarPoints = pts; be.isContinuedWhammy = cont; }
+    armStash = null;
+  }
+
   function show() {
+    armOn(); // 펼치기는 원래 악보(암 포함)에서 만든다
     let score = original;
     if (unroll) try { score = unrollScore(original); } catch (err) { console.warn("unroll failed", err); }
-    ensureApi().renderScore(score);
+    const E = alphaTab.NotationElement, els = ensureApi().settings.notation.elements;
+    for (const k of ["EffectHarmonics", "EffectHammerOnPullOffText"]) els.set(E[k], !fromPdf); // 원본에 없는 N.H.·H 글자
+    api.updateSettings();
+    armOff(score);
+    api.renderScore(score);
     return score !== original;
   }
 
@@ -244,6 +271,8 @@ window.createTabMode = function (h) {
       this.activate();
       ready = false;
       keep = null;
+      armOn();
+      fromPdf = false;
       original = alphaTab.importer.ScoreLoader.loadScoreFromBytes(bytes, ensureApi().settings);
       fixChannels(original);
       show();
@@ -253,6 +282,8 @@ window.createTabMode = function (h) {
       this.activate();
       ready = false;
       keep = null;
+      armOn();
+      fromPdf = true;
       original = score;
       fixChannels(original);
       show();

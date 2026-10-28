@@ -188,6 +188,13 @@
         a.noteHeadWhole = cymbal ? MF.NoteheadCircleXWhole : MF.NoteheadXWhole;
       }
     });
+    // 오선보가 × 머리인 TAB 음 (alphaTex에는 머리 모양 지정이 없어 표지로 받아 둔 것)
+    for (const t of atScore.tracks) for (const s of t.staves) for (const b of s.bars) for (const v of b.voices) for (const be of v.beats)
+      for (const n of be.notes) if (n.showStringNumber) {
+        n.showStringNumber = false;
+        n.style = new alphaTab.model.NoteStyle();
+        n.style.noteHead = MF.NoteheadXBlack;
+      }
     enterTabMode();
     tab.loadScore(atScore);
     window.pdfscore.lastTex = tex;
