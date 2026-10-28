@@ -55,7 +55,11 @@
     drawTitle: true,
     drawPartNames: true,
     followCursor: false,
-    cursorsOptions: [{ type: 0, color: "#3b82f6", alpha: 0.45, follow: false }],
+    // 재생 위치: 밴드 악보(alphaTab)와 같이 지금 마디는 노란 띠, 지금 박은 파란 선
+    cursorsOptions: [
+      { type: 3 /* CurrentArea: 마디 */, color: "#ffd600", alpha: 0.25, follow: false },
+      { type: 1 /* ThinLeft: 박 */, color: "#2563eb", alpha: 0.85, follow: false },
+    ],
   });
 
   const state = {
@@ -786,7 +790,7 @@
     await nextFrame();
     osmd.Zoom = state.zoom;
     osmd.render();
-    osmd.cursor.SkipInvisibleNotes = false;
+    for (const c of osmd.cursors || [osmd.cursor]) c.SkipInvisibleNotes = false;
 
     buildTimeline();
     setBaseTempo(osmd.Sheet.DefaultStartTempoInBpm || osmd.Sheet.userStartTempoInBPM || 120);
@@ -1366,22 +1370,23 @@
   }
 
   function showCursorAt(step) {
-    const c = osmd.cursor;
-    if (!c) return;
+    const cursors = osmd.cursors && osmd.cursors.length ? osmd.cursors : osmd.cursor ? [osmd.cursor] : [];
     const target = state.steps[step];
-    if (!target) return;
+    if (!cursors.length || !target) return;
     try {
       // 커서는 악보를 순서대로만 이동하므로, 도돌이표로 되돌아갈 때는 처음부터 다시 찾아간다
       const eps = 1e-6;
-      if (state.cursorStep < 0 || c.Iterator.CurrentSourceTimestamp.RealValue > target.sts + eps) {
-        c.show();
-        c.reset();
-      }
-      while (!c.Iterator.EndReached && c.Iterator.CurrentSourceTimestamp.RealValue < target.sts - eps) {
-        c.Iterator.moveToNext();
+      for (const c of cursors) {
+        if (state.cursorStep < 0 || c.Iterator.CurrentSourceTimestamp.RealValue > target.sts + eps) {
+          c.show();
+          c.reset();
+        }
+        while (!c.Iterator.EndReached && c.Iterator.CurrentSourceTimestamp.RealValue < target.sts - eps) {
+          c.Iterator.moveToNext();
+        }
+        c.update();
       }
       state.cursorStep = step;
-      c.update();
     } catch (err) {
       console.warn("cursor", err);
     }
