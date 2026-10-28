@@ -1458,6 +1458,8 @@
     a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 1000);
   };
+  // 화면 전체는 스크롤하지 않는다 (포커스 이동 등으로 밀려 내려가면 도구 막대에 닿을 수 없게 됨)
+  window.addEventListener("scroll", () => { if (window.scrollX || window.scrollY) window.scrollTo(0, 0); });
   const isTouch = matchMedia("(pointer: coarse)").matches;
   if (!isTouch && /^https?:$/.test(location.protocol)) setTimeout(warmUpEngine, 3000);
   ui.file.parentElement.addEventListener("click", () => warmUpEngine());
