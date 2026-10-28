@@ -1087,18 +1087,8 @@ export function parseStdStaff(page, staff, glyphs, verts, beams, bars, opts = {}
   });
   measures.forEach((m, i) => { if (!opts.drums && !dropParenAlt(m, bigParens, fullOf(i)) && !m.some(e => e.voice === 2) && !splitVoices(m, fullOf(i))) fixOverfull(m, bigParens, fullOf(i)); });
   measures.forEach((m, i) => fillAmbiguous(m, edges[i + 1], fullOf(i)));
-  // 8va: "8va" 글자부터 점선 끝까지, 바로 아래 보표의 음을 한 옥타브 위로
-  for (const o of glyphs.filter(q => q.cls === "ottava" && q.bbox[3] < staff.top + g && q.bbox[3] > staff.top - g * 10 && q.x > staff.x0 - 5 && q.x < staff.x1)) {
-    const oc = (o.bbox[1] + o.bbox[3]) / 2;
-    // 이 보표와 글자 사이에 다른 보표가 있으면 그 보표의 것
-    if ((opts.others || []).some(st => st.top > oc && st.top < staff.top - 1)) continue;
-    let x1 = o.bbox[2] + g * 4;
-    const dashes = page.rects.filter(r => r.y1 - r.y0 < 1.2 && r.x1 - r.x0 < g && r.x0 > o.bbox[2] - 1 && Math.abs((r.y0 + r.y1) / 2 - o.bbox[1]) < g * 1.5).sort((a, b) => a.x0 - b.x0);
-    let end = o.bbox[2];
-    for (const r of dashes) { if (r.x0 - end > g * 1.6) break; end = r.x1; }
-    if (end > o.bbox[2] + 2) x1 = end + 1;
-    for (const m of measures) for (const e of m) if (!e.rest && e.x >= o.bbox[0] - 1 && e.x <= x1) for (const n of e.notes) if (!n.ottava) { n.oct += 1; n.ottava = true; }
-  }
+  // 8va·8va bassa: 그 구간의 음을 소리 나는 높이(한 옥타브 위·아래)로 적고, 박에 표시(e.ottava)를 남겨 원본처럼 8va 기호로 그린다
+  measures.ottava = ottavaSpans(page, staff, glyphs, opts.others); // 적용은 parseSystems에서 (다음 단으로 이어지는지 보고)
   measures.clef = clef; measures.key = key;
   return measures;
 }
@@ -1385,6 +1375,52 @@ export function parseBandScore(pages) {
 }
 
 /**
+ * 보표에 걸린 8va(한 옥타브 위)·15ma(두 옥타브 위)·8va bassa(한 옥타브 아래) 구간 → [{ x0, x1, shift: 1 | 2 | -1 }]
+ *  8va는 보표 위, 8va bassa는 보표 아래에 적힌다. 구간 끝은 점선 끝, 없으면 같은 줄의 "(8va)" 끝 표시까지,
+ *  그것도 없으면 단 끝까지 (단마다 시작 기호를 다시 적는다). 악보 글꼴의 8va는 점선이 없으면 글자 근처만
+ */
+function ottavaSpans(page, staff, glyphs, others = []) {
+  const g = staff.gap, spans = [];
+  // 괄호로 감싼 "(8va)"는 끝 표시
+  const paren = (q, side) => glyphs.some(r => r !== q && r.bbox[3] - r.bbox[1] > 2 && r.bbox[2] - r.bbox[0] < 1.6 && Math.abs(r.bbox[3] - q.bbox[3]) < 2.5 &&
+    (side < 0 ? r.bbox[2] < q.bbox[0] + 0.5 && q.bbox[0] - r.bbox[2] < 2.5 : r.bbox[0] > q.bbox[2] - 0.5 && r.bbox[0] - q.bbox[2] < 2.5));
+  const isEnd = q => paren(q, -1) && paren(q, 1);
+  const SHIFT = { ottava: 1, ottava15: 2, ottava_b: -1 };
+  const marks = glyphs.filter(q => q.x > staff.x0 - 5 && q.x < staff.x1 &&
+    (((q.cls === "ottava" || q.cls === "ottava15") && q.bbox[3] < staff.top + g && q.bbox[3] > staff.top - g * 10) ||
+     (q.cls === "ottava_b" && q.bbox[1] > staff.bottom - g && q.bbox[1] < staff.bottom + g * 10)));
+  const sameLine = (a, b) => a.cls === b.cls && Math.abs(a.bbox[3] - b.bbox[3]) < 5;
+  for (const o of marks) {
+    const oc = (o.bbox[1] + o.bbox[3]) / 2, below = o.cls === "ottava_b", shift = SHIFT[o.cls];
+    // 이 보표와 글자 사이에 다른 보표가 있으면 그 보표의 것
+    if (others.some(st => below ? st.bottom < oc && st.bottom > staff.bottom + 1 : st.top > oc && st.top < staff.top - 1)) continue;
+    if (isEnd(o)) {
+      // 줄 앞쪽의 "(8va)"만 있고 시작 기호가 없으면 앞 줄에서 이어진 것: 줄 처음부터 여기까지
+      if (!marks.some(q => q !== o && sameLine(q, o) && q.bbox[0] < o.bbox[0] && !isEnd(q))) spans.push({ x0: staff.x0, x1: o.bbox[2] + g, shift });
+      continue;
+    }
+    const dashes = page.rects.filter(r => r.y1 - r.y0 < 1.2 && r.x1 - r.x0 < g && r.x0 > o.bbox[2] - 1 && Math.abs((r.y0 + r.y1) / 2 - o.bbox[1]) < g * 1.5).sort((a, b) => a.x0 - b.x0);
+    let end = o.bbox[2];
+    for (const r of dashes) { if (r.x0 - end > g * 1.6) break; end = r.x1; }
+    // 꺾쇠와 이어진 한 줄짜리 선(⌐────┐). 직선만으로 된 기호 (이음줄 같은 곡선은 아님)
+    const line = glyphs.find(r => r !== o && r.bbox[3] - r.bbox[1] < 4 && r.bbox[0] < o.bbox[0] + 1 && r.bbox[0] > o.bbox[0] - g * 5 &&
+      r.bbox[2] > o.bbox[2] + g * 3 && Math.abs(r.bbox[3] - o.bbox[3]) < 4 && !r.segs.some(s => String(s.op) === "2"));
+    let x1;
+    if (end > o.bbox[2] + 2) x1 = end + 1;
+    else if (line) x1 = line.bbox[2] + 1;
+    else if (o.text) x1 = o.bbox[2] + g * 4;
+    else {
+      const stop = marks.filter(q => q !== o && sameLine(q, o) && q.bbox[0] > o.bbox[2]).sort((a, b) => a.bbox[0] - b.bbox[0])[0];
+      x1 = stop ? (isEnd(stop) ? stop.bbox[2] + g : stop.bbox[0] - 1) : staff.x1;
+    }
+    // 구간은 글자 왼쪽의 꺾쇠(⌐ └)부터
+    const hook = glyphs.find(r => r !== o && r.bbox[2] <= o.bbox[0] + 0.5 && o.bbox[0] - r.bbox[2] < 2.5 && r.bbox[2] - r.bbox[0] < 6 && Math.abs(r.bbox[3] - o.bbox[3]) < 3);
+    spans.push({ x0: Math.min(hook ? hook.bbox[0] : o.bbox[0], line ? line.bbox[0] : Infinity) - 1, x1, shift });
+  }
+  return spans;
+}
+
+/**
  * TAB 위 오선보의 음높이({ d: 온음계 번호(C0 = 0), alt: 임시표 }, 높은 음부터)를 TAB 박에 적어 둔다.
  * TAB은 같은 프렛인데 오선보 음높이가 바뀌면 암(트레몰로 암)이나 초킹으로 음을 올리고 내린 것이다
  */
@@ -1464,7 +1500,7 @@ function parseSystems(list) {
   const layoutCache = new Map();
   let ts = [4, 4];
   const beamCache = new Map(), staveCache = new Map();
-  const multiRepeats = [], sysStart = [];
+  const multiRepeats = [], sysStart = [], ottLog = [];
   let sysNo = -1;
   for (const { pg, pi, sys, sig } of list) {
     sysNo++;
@@ -1499,7 +1535,11 @@ function parseSystems(list) {
       const parsed = layout.map(p => {
         if (p.kind === "guitar" || p.kind === "bass") {
           const ms = parseTabStaff(pg, sys.staves[p.tab], pg.glyphs, verts, beams, sb, fulls, p.std != null ? smallHeadXs(sys.staves[p.std], pg.glyphs) : []);
-          if (p.std != null) markStdPitch(ms, sys.staves[p.std], pg.glyphs);
+          if (p.std != null) {
+            markStdPitch(ms, sys.staves[p.std], pg.glyphs);
+            // 오선보의 8va는 표기만 (소리는 TAB 프렛 그대로)
+            ms.ottava = ottavaSpans(pg, sys.staves[p.std], pg.glyphs, pageStaves); // 오선보의 8va는 표기만 (소리는 TAB 프렛 그대로)
+          }
           return ms;
         }
         if (p.kind === "piano") {
@@ -1507,6 +1547,7 @@ function parseSystems(list) {
           const lo = parseStdStaff(pg, sys.staves[p.lower], pg.glyphs, verts, beams, sb, { others: pageStaves, fulls });
           const both = up.map((m, i) => { const r = [...m.map(e => ({ ...e, staff: 0 })), ...(lo[i] || []).map(e => ({ ...e, staff: 1 }))]; r.repeatOf2 = m.repeatOf2; r.repeatOf1 = m.repeatOf1 && (lo[i]?.repeatOf1 || !lo[i]?.length); r.x0 = m.x0; r.x1 = m.x1; r.key = m.key; return r; });
           both.key = up.key;
+          both.ottava = [...up.ottava, ...lo.ottava.map(sp => ({ ...sp, staff: 1 }))];
           return both;
         }
         return parseStdStaff(pg, sys.staves[p.std], pg.glyphs, verts, beams, sb, { drums: p.kind === "drums", others: pageStaves, fulls });
@@ -1544,6 +1585,8 @@ function parseSystems(list) {
         if (!t) { t = { ...p, index: parts.length, measures: [] }; parts.push(t); while (t.measures.length < bars.length) t.measures.push([]); }
         return t;
       });
+      layout.forEach((p, k) => ottLog.push({ part: targets[k], sys: sysNo, spans: parsed[k].ottava || [], tab: p.kind === "guitar" || p.kind === "bass",
+        x0: sys.staves[p.std ?? p.tab].x0, x1: sys.staves[p.std ?? p.tab].x1 }));
       // 여러 마디 반복 기호: 숫자(4 등) 아래 "///"가 마디줄 위에 걸쳐 있다. 그 마디줄을 가운데로 하는 n마디가 앞 n마디의 반복
       for (const [k, p] of layout.entries()) {
         const st = sys.staves[p.std ?? p.tab], g = st.gap;
@@ -1587,6 +1630,34 @@ function parseSystems(list) {
       }
     }
   }
+  // 8va 구간 적용: 오선보는 소리 나는 높이로 옮기고, 박에 표시(e.ottava)를 남겨 8va 기호로 그린다 (TAB은 표시만)
+  //  단 끝까지 열린 구간은 그 뒤 표시 없는 단을 지나 다음 "(8va)" 끝 표시(다음 단 첫머리)까지 이어진다.
+  //  끝 표시보다 새 시작 기호가 먼저 나오거나 끝 표시가 없으면, 쉼표뿐인 마디 앞에서 끝난다 (짧은 화살표만 있는 8va)
+  const sysMeasures = sys => { const to = sysStart[sys + 1]?.[0] ?? bars.length, out = []; for (let i = sysStart[sys][0]; i < to; i++) out.push(i); return out; };
+  const shiftRange = (part, sys, st, shift, tab, x0 = -Infinity, x1 = Infinity) => {
+    for (const i of sysMeasures(sys)) for (const e of part.measures[i] || []) if (!e.rest && (e.staff ?? 0) === st && e.x >= x0 && e.x <= x1) {
+      if (!tab) for (const n of e.notes) if (!n.ottava) { n.oct += shift; n.ottava = true; }
+      e.ottava = shift;
+    }
+  };
+  for (const part of parts) for (const st of [0, 1]) {
+    const log = ottLog.filter(r => r.part === part).map(r => ({ ...r, sp: r.spans.filter(s => (s.staff ?? 0) === st).sort((a, b) => a.x0 - b.x0) }));
+    log.forEach((r, k) => {
+      for (const s of r.sp) {
+        let x1 = s.x1;
+        if (s.x1 >= r.x1 - 0.5) {
+          const next = log.slice(k + 1).find(q => q.sp.length);
+          const carried = next && next.sp[0].x0 <= next.x0 + 0.5 && next.sp[0].shift === s.shift;
+          if (carried) for (const q of log.slice(k + 1, log.indexOf(next))) shiftRange(part, q.sys, st, s.shift, q.tab);
+          else {
+            const rest = sysMeasures(r.sys).map(i => part.measures[i]).find(m => m && m.x0 > s.x0 && !m.some(e => !e.rest && (e.staff ?? 0) === st));
+            if (rest) x1 = rest.x0;
+          }
+        }
+        shiftRange(part, r.sys, st, s.shift, r.tab, s.x0, x1);
+      }
+    });
+  }
   const cp = src => { const r = (src || []).map(e => ({ ...e, notes: e.notes.map(n => ({ ...n })) })); r.x0 = src?.x0; r.x1 = src?.x1; return r; };
   // 여러 마디 반복: 가운데 마디줄 앞뒤로 n/2마디씩 (줄이 바뀌어도 이어진다)
   for (const { part, n, sys, j, at } of multiRepeats) {
@@ -1617,10 +1688,25 @@ function parseSystems(list) {
       if (!n.tieIn) continue;
       delete n.tieIn;
       const src = (p.measures[i - 1] || []).filter(a => !a.rest && (a.staff ?? 0) === (e.staff ?? 0)).sort((a, b) => b.x - a.x)
-        .map(a => a.notes.find(o => sameNote(n, o))).find(Boolean);
-      if (src) { n.tie = true; if (src.alter !== undefined) n.alter = src.alter; }
+        .map(a => a.notes.find(o => sameNote(n, o)) ||
+          a.notes.find(o => n.step && o.step === n.step && (o.ottava || n.ottava) && Math.abs(o.oct - n.oct) <= 2)).find(Boolean); // 8va 경계
+      if (src) { n.tie = true; if (src.alter !== undefined) n.alter = src.alter; if (n.step) n.oct = src.oct; }
     }
   });
+  // 8va 구간 경계에 걸친 붙임줄: 뒤 음을 앞 음의 (소리 나는) 높이에 맞춘다
+  for (const p of parts) {
+    const last = new Map(); // 보표·성부별 바로 앞 박
+    for (const m of p.measures) for (const e of [...m].sort((a, b) => a.x - b.x)) {
+      if (e.rest || !e.notes?.length) continue;
+      const key = `${e.staff ?? 0}:${e.voice || 1}`, prev = last.get(key);
+      if (prev) for (const n of e.notes) {
+        if (!n.tie || !n.step || prev.notes.some(o => o.step === n.step && o.oct === n.oct)) continue;
+        const src = prev.notes.find(o => o.step === n.step && Math.abs(o.oct - n.oct) <= 2 && (o.ottava || n.ottava));
+        if (src) n.oct = src.oct;
+      }
+      last.set(key, e);
+    }
+  }
   for (const p of parts) if (p.kind === "guitar" || p.kind === "bass") applyWhammy(p, bars);
   return { parts, bars, report };
 }
@@ -1839,6 +1925,8 @@ function beatTex(e, kind, strings = 6, perc = false) {
   if (e.dots) fx.push(e.dots === 2 ? "dd" : "d");
   if (e.tuplet) fx.push(`tu ${e.tuplet}`);
   if (e.tremolo && !e.rest) fx.push("tp 16");
+  if (e.ottava && !e.rest && kind !== "drums") fx.push(`ot ${{ 2: "15ma", 1: "8va", "-1": "8vb" }[e.ottava]}`); // 표시만 (음은 이미 소리 나는 높이)
+  if (e.label) fx.push(`txt "${e.label}"`);
   if (e.chord) fx.push(`ch "${e.chord}"`);
   if (kind === "tab" && e.whammy && (e.whammy[0] || e.whammy[1]) && !e.rest) fx.push(`tb (${e.whammy[0] * 2} ${e.whammy[1] * 2})`); // 4분의 1음 단위
   // 음표 효과({t})와 박 효과가 함께 있을 때 헷갈리지 않도록 화음 괄호로 감싼다
@@ -1954,7 +2042,7 @@ export function toAlphaTex(score, title = "", tempo = 120) {
     const voiceCount = kind === "drums" || voiced.some(Boolean) ? 2 : 1;
     for (let v = 1; v <= voiceCount; v++) {
       if (voiceCount > 1) out += `\\voice\n`;
-      let lastTs = null, lastKey = null;
+      let lastTs = null, lastKey = null, lastOt = 0;
       measures.forEach((m, i) => {
         const full = barLen(i);
         let evs = [...m].sort((a, b) => a.x - b.x);
@@ -1970,6 +2058,11 @@ export function toAlphaTex(score, title = "", tempo = 120) {
         if (i === 0 && bars[0].anacrusis) head += "\\ac ";
         if (first && v === 1) head = navTex(bars[i].nav, hasCoda) + head; // 연주 순서는 첫 트랙에만
         const beats = first && v === 1 && bars[i].chords ? placeChords(fitted, bars[i].chords) : fitted;
+        // alphaTab은 8vb 선을 그리지 않으므로 8va bassa 구간 첫 박에 글자로 적는다
+        for (const e of beats) if (!e.rest) {
+          if (e.ottava === -1 && lastOt !== -1) e.label = "8va bassa";
+          lastOt = e.ottava || 0;
+        }
         out += head + beats.map(e => beatTex(e, kind, p.strings, p.extra)).join(" ") + " |\n";
       });
     }
