@@ -135,6 +135,20 @@ window.createTabMode = function (h) {
     api.playbackSpeed = rate;
   }
 
+  /* ---------- MIDI 채널 ---------- */
+  // 9번 채널(10번째)은 드럼 전용이다. 악기 트랙이 이 채널을 쓰면(트랙마다 두 채널씩 차례로 받다 보면 생긴다)
+  // 하모닉스·벤드처럼 보조 채널로 가는 음이 드럼 소리가 되거나 소리가 나지 않으므로 9번을 건너뛰어 다시 배정한다
+  function fixChannels(score) {
+    const melodic = score.tracks.filter(t => !t.staves.some(s => s.isPercussion));
+    if (!melodic.some(t => t.playbackInfo.primaryChannel === 9 || t.playbackInfo.secondaryChannel === 9)) return;
+    let ch = 0;
+    const next = () => { if (ch === 9) ch++; return ch++; };
+    for (const t of melodic) {
+      t.playbackInfo.primaryChannel = next();
+      t.playbackInfo.secondaryChannel = next();
+    }
+  }
+
   /* ---------- 연주 순서 펼치기 ---------- */
   /** 도돌이표·괄호·D.S.·Coda를 alphaTab이 연주하는 순서대로 펼친 새 Score를 만든다 */
   function unrollScore(score) {
@@ -219,6 +233,7 @@ window.createTabMode = function (h) {
       ready = false;
       keep = null;
       original = alphaTab.importer.ScoreLoader.loadScoreFromBytes(bytes, ensureApi().settings);
+      fixChannels(original);
       show();
     },
     /** 이미 만들어진 alphaTab Score 객체를 연다 (PDF에서 읽어 낸 악보) */
@@ -227,6 +242,7 @@ window.createTabMode = function (h) {
       ready = false;
       keep = null;
       original = score;
+      fixChannels(original);
       show();
     },
     /** 반복 기호를 그대로 둘지(false), 연주 순서대로 펼칠지(true). 켰는데 펼칠 것이 없으면 false */
