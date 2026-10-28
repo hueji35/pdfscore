@@ -33,7 +33,8 @@ export function findStaves(page) {
     const merged = [];
     for (const l of grp) {
       const last = merged[merged.length - 1];
-      if (last && l.x0 > last.x1 - 1 && l.x0 - last.x1 < 30) { last.gaps.push([last.x1, l.x0]); last.x1 = l.x1; last.y = (last.y + l.y) / 2; }
+      // 마디마다 끊어 그린 오선(맞붙은 조각)은 빈칸이 아니다
+      if (last && l.x0 > last.x1 - 1 && l.x0 - last.x1 < 30) { if (l.x0 - last.x1 > 1) last.gaps.push([last.x1, l.x0]); last.x1 = l.x1; last.y = (last.y + l.y) / 2; }
       else merged.push({ ...l, gaps: [] });
     }
     lines.push(...merged);
@@ -201,7 +202,7 @@ function beamsOf(page) {
   for (const g of page.glyphs) {
     if (g.cls) continue;
     const ops = g.segs.map(q => q.op).join("");
-    if (!/^0111(3)?$/.test(ops)) continue;
+    if (!/^01111?(3)?$/.test(ops)) continue; // 닫는 변을 선으로 한 번 더 그리기도 한다
     const w = g.bbox[2] - g.bbox[0], h = g.bbox[3] - g.bbox[1];
     if (w < 2.2 || h > 12) continue; // 16분 꼬리 빔 조각은 폭이 2.8pt 정도
     // 세로로 평행한 두 변(같은 x 위에 두 점씩)이어야 빔
@@ -760,7 +761,11 @@ export function clefOf(staff, glyphs) {
 /** 보표 맨 앞(음자리표 바로 뒤)의 조표: 샵/플랫 개수 (+는 샵, -는 플랫) */
 export function keyOf(staff, glyphs, firstNoteX) {
   const acc = glyphs.filter(q => (q.cls === "sharp" || q.cls === "flat") && q.x > staff.x0 + 6 && q.x < Math.min(firstNoteX - 3, staff.x0 + 60) &&
-    (q.bbox[1] + q.bbox[3]) / 2 > staff.top - staff.gap * 1.5 && (q.bbox[1] + q.bbox[3]) / 2 < staff.bottom + staff.gap);
+    (q.bbox[1] + q.bbox[3]) / 2 > staff.top - staff.gap * 1.5 && (q.bbox[1] + q.bbox[3]) / 2 < staff.bottom + staff.gap)
+    .sort((a, b) => a.bbox[0] - b.bbox[0]);
+  // 조표는 촘촘히 붙어 있다. 한 칸 넘게 떨어진 것은 첫 음의 임시표
+  const gapAt = acc.findIndex((q, i) => i > 0 && q.bbox[0] - acc[i - 1].bbox[2] > staff.gap * 1.2);
+  if (gapAt > 0) acc.length = gapAt;
   const sharps = acc.filter(q => q.cls === "sharp").length, flats = acc.filter(q => q.cls === "flat").length;
   return sharps ? sharps : -flats;
 }
@@ -1026,7 +1031,8 @@ export function parseStdStaff(page, staff, glyphs, verts, beams, bars, opts = {}
     for (const n of b.notes) {
       const src = a.notes.find(o => o.step === n.step && o.oct === n.oct);
       if (!src) continue;
-      const arc = arcs.find(q => q.bbox[0] > a.x1 - 2 && q.bbox[2] < b.x + 3 && Math.abs((q.bbox[1] + q.bbox[3]) / 2 - n.cy) < (q.bbox[2] - q.bbox[0] > 40 ? g * 2 : g * 1.6));
+      // 음표머리 오른쪽 끝보다 조금 안쪽에서 시작하는 붙임줄도
+      const arc = arcs.find(q => q.bbox[0] > a.x1 - 3 && q.bbox[2] < b.x + 3 &&Math.abs((q.bbox[1] + q.bbox[3]) / 2 - n.cy) < (q.bbox[2] - q.bbox[0] > 40 ? g * 2 : g * 1.6));
       if (arc) { n.tie = true; n.alter = src.alter; } // 붙임줄로 이어진 음은 마디를 넘어도 앞 음의 임시표 그대로
     }
   }
@@ -1321,6 +1327,12 @@ export function parseBandScore(pages) {
   for (const pg of pages) {
     if (pg.tupletsAdded) continue;
     pg.tupletsAdded = true;
+    // 글자로 찍힌 온쉼표·2분쉼표(막대)는 도형으로 그린 것과 같이 사각형으로 넣어 둔다 (rectRests가 찾는다)
+    for (const q of pg.glyphs) if (q.cls === "rest_bar") pg.rects.push({ x0: q.bbox[0], y0: q.bbox[1], x1: q.bbox[2], y1: q.bbox[3], fill: "#000000" });
+    // 페이지 원점 기준 좌표로 그린 도형(붙임줄 등)은 이동값이 기호 위치가 아니므로 기호 가운데로
+    for (const q of pg.glyphs) if (!q.text && (q.x < q.bbox[0] - 20 || q.x > q.bbox[2] + 20)) q.x = (q.bbox[0] + q.bbox[2]) / 2;
+    // 기울임꼴 글자 "8"만으로 적은 8va (마디 번호는 바로 선 글꼴이라 빠진다)
+    for (const q of pg.glyphs) if (!q.cls && q.text && q.uni === "8" && /italic|oblique/i.test(q.font || "")) q.cls = "ottava";
     const sts = findStaves(pg);
     const tupFont = f => /italic|oblique|OpusText|MaestroTimes/i.test(f || "");
     const atStart = x => sts.some(st => x < st.x0 + 15 && x > st.x0 - 15); // 마디 번호
@@ -1405,8 +1417,12 @@ function ottavaSpans(page, staff, glyphs, others = []) {
     // 꺾쇠와 이어진 한 줄짜리 선(⌐────┐). 직선만으로 된 기호 (이음줄 같은 곡선은 아님)
     const line = glyphs.find(r => r !== o && r.bbox[3] - r.bbox[1] < 4 && r.bbox[0] < o.bbox[0] + 1 && r.bbox[0] > o.bbox[0] - g * 5 &&
       r.bbox[2] > o.bbox[2] + g * 3 && Math.abs(r.bbox[3] - o.bbox[3]) < 4 && !r.segs.some(s => String(s.op) === "2"));
+    // 글자 바로 오른쪽에서 시작하는 가는 사각형 한 줄(점선 대신 실선)
+    const bar = page.rects.filter(r => r.y1 - r.y0 < 1 && r.x1 - r.x0 > g * 3 && r.x0 > o.bbox[2] - 1 && r.x0 - o.bbox[2] < g * 1.5 &&
+      (r.y0 + r.y1) / 2 > o.bbox[1] - 1 && (r.y0 + r.y1) / 2 < o.bbox[3] + 1).sort((a, b) => b.x1 - a.x1)[0];
     let x1;
     if (end > o.bbox[2] + 2) x1 = end + 1;
+    else if (bar) x1 = bar.x1 + 1;
     else if (line) x1 = line.bbox[2] + 1;
     else if (o.text) x1 = o.bbox[2] + g * 4;
     else {
@@ -1522,7 +1538,8 @@ function parseSystems(list) {
       let courtesy = null;
       for (let i = 0; i < nMeasures; i++) {
         // 마디 끝 겹세로줄 바로 앞의 박자표는 다음 마디부터 (예고 박자표)
-        const t = timeSigAt(sys.staves[0], pg.glyphs, edges[i], Math.min(edges[i] + 40, edges[i + 1] - 9)) || courtesy;
+        // 음자리표·조표 뒤의 박자표까지 (보표 간격이 큰 악보는 더 멀다)
+        const t = timeSigAt(sys.staves[0], pg.glyphs, edges[i], Math.min(edges[i] + Math.max(40, sys.staves[0].gap * 12), edges[i + 1] - 9)) || courtesy;
         if (t) ts = t;
         tsList.push(ts.slice());
         courtesy = timeSigAt(sys.staves[0], pg.glyphs, edges[i + 1] - 9, edges[i + 1]);
