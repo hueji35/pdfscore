@@ -610,6 +610,7 @@ export function fillAmbiguous(m, endX, full = 1) {
  */
 export function applyRepeatSigns(measures, edges, signs, full = 1) {
   const copy = e => ({ ...e, notes: e.notes.map(n => ({ ...n })), stem: undefined, copied: true });
+  signs = [...signs].sort((a, b) => a.bbox[0] - b.bbox[0]); // 앞 마디부터 (이어진 % 기호가 앞 결과를 이어 받게)
   for (const sg of signs) {
     const cx = (sg.bbox[0] + sg.bbox[2]) / 2;
     // 마디줄 위에 걸쳐 있으면 두 마디 반복: 그 앞뒤 두 마디 = 바로 앞의 두 마디
@@ -622,7 +623,10 @@ export function applyRepeatSigns(measures, edges, signs, full = 1) {
     const i = edges.findIndex((x, k) => k < edges.length - 1 && cx > x && cx < edges[k + 1]);
     if (i < 0) continue;
     const m = measures[i];
-    if (sg.cls === "repeat1" && m.length === 0 && i > 0) {
+    if (sg.cls === "repeat1" && m.length === 0 && (i === 0 || measures[i - 1].repeatOf1)) {
+      // 단 첫 마디의 %: 앞 마디가 앞 단에 있으므로 표시만 해 두고, 단을 다 모은 뒤 채운다
+      m.repeatOf1 = true;
+    } else if (sg.cls === "repeat1" && m.length === 0) {
       measures[i] = measures[i - 1].map(copy);
       measures[i].forEach(e => (e.x = (edges[i] + edges[i + 1]) / 2));
       measures[i].repeatOf = i - 1;
@@ -1494,7 +1498,7 @@ function parseSystems(list) {
         if (p.kind === "piano") {
           const up = parseStdStaff(pg, sys.staves[p.std], pg.glyphs, verts, beams, sb, { others: pageStaves, fulls });
           const lo = parseStdStaff(pg, sys.staves[p.lower], pg.glyphs, verts, beams, sb, { others: pageStaves, fulls });
-          const both = up.map((m, i) => { const r = [...m.map(e => ({ ...e, staff: 0 })), ...(lo[i] || []).map(e => ({ ...e, staff: 1 }))]; r.repeatOf2 = m.repeatOf2; r.x0 = m.x0; r.x1 = m.x1; r.key = m.key; return r; });
+          const both = up.map((m, i) => { const r = [...m.map(e => ({ ...e, staff: 0 })), ...(lo[i] || []).map(e => ({ ...e, staff: 1 }))]; r.repeatOf2 = m.repeatOf2; r.repeatOf1 = m.repeatOf1 && (lo[i]?.repeatOf1 || !lo[i]?.length); r.x0 = m.x0; r.x1 = m.x1; r.key = m.key; return r; });
           both.key = up.key;
           return both;
         }
@@ -1583,6 +1587,10 @@ function parseSystems(list) {
     for (let c = center - Math.floor(n / 2); c < center + Math.ceil(n / 2); c++)
       if (c - n >= 0 && c < part.measures.length) part.measures[c] = cp(part.measures[c - n]);
   }
+  // 단 첫머리의 % (한 마디 반복): 바로 앞 마디(앞 단 끝)를 그대로
+  for (const p of parts) p.measures.forEach((m, i) => {
+    if (m.repeatOf1 && !m.some(e => !e.rest) && i >= 1) p.measures[i] = cp(p.measures[i - 1]);
+  });
   // 두 마디 반복 기호
   for (const p of parts) p.measures.forEach((m, i) => {
     if (m.repeatOf2 && i >= 2) {
