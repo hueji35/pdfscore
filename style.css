@@ -126,6 +126,8 @@ body.parts-hidden .parts { margin-left: -280px; }
 .score-wrap {
   flex: 1; min-width: 0; overflow-y: auto; overflow-x: hidden; position: relative;
   -webkit-overflow-scrolling: touch;
+  /* alphaTab 커서(z-index 1000)가 악보 영역 밖으로 올라와 모바일 파트 패널을 덮지 않게 가둔다 */
+  isolation: isolate;
 }
 #score {
   background: var(--paper); margin: 12px auto 40vh; max-width: 1400px;
