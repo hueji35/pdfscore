@@ -1356,8 +1356,17 @@
   }
 
   function updateTimeUi(pos) {
-    ui.timeCur.textContent = fmtTime(pos);
-    if (!state.seeking) ui.seek.value = Math.round((pos / state.totalSec) * 1000);
+    setTimeUi(pos, state.totalSec);
+  }
+
+  // 재생 중에는 아주 자주 불린다(alphaTab은 초당 약 375번). 값이 바뀔 때만 화면을 건드려 휴대폰 부담을 줄인다
+  function setTimeUi(cur, total) {
+    const text = fmtTime(cur), end = fmtTime(total);
+    if (ui.timeCur.textContent !== text) ui.timeCur.textContent = text;
+    if (ui.timeTotal.textContent !== end) ui.timeTotal.textContent = end;
+    if (state.seeking || !total) return;
+    const v = String(Math.round((cur / total) * 1000));
+    if (ui.seek.value !== v) ui.seek.value = v;
   }
 
   /* --------------------------------------------------- 커서 / 스크롤 */
@@ -1467,9 +1476,7 @@
     baseTempo: bpm => setBaseTempo(bpm),
     time: (cur, total) => {
       tabTotal = total;
-      ui.timeCur.textContent = fmtTime(cur);
-      ui.timeTotal.textContent = fmtTime(total);
-      if (!state.seeking && total) ui.seek.value = Math.round((cur / total) * 1000);
+      setTimeUi(cur, total);
     },
   });
 
