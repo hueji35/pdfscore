@@ -129,6 +129,7 @@
     await loadAlphaTab();
     enterTabMode();
     tab.loadFile(new Uint8Array(await file.arrayBuffer()));
+    ui.save.hidden = false;
   }
   /**
    * 악보 프로그램이 만든(벡터) 밴드 스코어 PDF를 그림 인식 없이 데이터로 읽어 밴드 악보 모드로 연다.
@@ -201,6 +202,7 @@
       }
     enterTabMode();
     tab.loadScore(atScore);
+    ui.save.hidden = false;
     window.pdfscore.lastTex = tex;
     toast(`PDF 데이터로 ${score.bars.length}마디를 읽었습니다${tempo ? "" : " (템포 표시가 없어 ♩=120으로 시작합니다. 템포 슬라이더로 맞춰 주세요)"}.` +
       (score.report.length ? " " + score.report.join(" ") : ""), 8000);
@@ -801,6 +803,7 @@
     ui.wrap.scrollTop = 0;
     [ui.play, ui.stop, ui.rewind, ui.seek].forEach(el => (el.disabled = false));
     updateTimeUi(0);
+    ui.save.hidden = state.source.content.startsWith("PK"); // 압축을 못 푼 .mxl은 글자로 저장할 수 없다
     hideOverlay();
 
     ensureAudio();
@@ -1483,10 +1486,24 @@
   /* ------------------------------------------------------- UI 이벤트 */
   ui.cancel.onclick = ui.omrBarCancel.onclick = () => { if (omrAbort) omrAbort.abort(); };
   ui.save.onclick = () => {
-    if (!lastRecognized) return;
+    const base = fileName.replace(/\.[^.]+$/, "") || "score";
+    let blob, name;
+    if (tab.active) {
+      try {
+        blob = new Blob([tab.exportGp()], { type: "application/octet-stream" });
+        name = base + ".gp";
+      } catch (err) {
+        console.error(err);
+        return alertBox("악보를 저장하지 못했습니다", `<p>${escapeHtml(err.message || String(err))}</p>`);
+      }
+    } else {
+      // 인식 결과는 표시하려고 고치기 전의 내용을 저장한다
+      blob = new Blob([lastRecognized ? lastRecognized.xml : state.source.content], { type: "application/vnd.recordare.musicxml+xml" });
+      name = base + ".musicxml";
+    }
     const a = document.createElement("a");
-    a.href = URL.createObjectURL(new Blob([lastRecognized.xml], { type: "application/vnd.recordare.musicxml+xml" }));
-    a.download = lastRecognized.name;
+    a.href = URL.createObjectURL(blob);
+    a.download = name;
     a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 1000);
   };

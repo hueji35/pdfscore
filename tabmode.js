@@ -288,6 +288,12 @@ window.createTabMode = function (h) {
       fixChannels(original);
       show();
     },
+    /** 악보를 펼치지 않은 원래 모습 그대로 Guitar Pro 7 파일 바이트로 만든다 */
+    exportGp() {
+      armOn(); // 그림에서만 숨겨 둔 암도 파일에는 넣는다
+      try { return new alphaTab.exporter.Gp7Exporter().export(original, api.settings); }
+      finally { armOff(api.score); }
+    },
     /** 반복 기호를 그대로 둘지(false), 연주 순서대로 펼칠지(true). 켰는데 펼칠 것이 없으면 false */
     setUnroll(on) {
       unroll = on;
