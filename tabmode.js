@@ -195,6 +195,15 @@ window.createTabMode = function (h) {
       const src = s.bars, home = new Map();
       src.forEach((bar, i) => { for (const n of notesOf(bar)) home.set(n.id, i); });
       const copies = order.map(i => structuredClone(src[i]));
+      // 가사가 여러 줄(1절·2절…)이면 그 마디를 몇 번째 지날 때인지에 맞는 줄만 남긴다
+      const passes = new Map();
+      copies.forEach((bar, k) => {
+        const pass = passes.get(order[k]) || 0;
+        passes.set(order[k], pass + 1);
+        for (const v of bar.voices) for (const b of v.beats) {
+          if (b.lyrics && b.lyrics.length > 1) b.lyrics = [b.lyrics[Math.min(pass, b.lyrics.length - 1)] || ""];
+        }
+      });
       const ids = copies.map(bar => {
         const map = new Map();
         bar.id = barId++;

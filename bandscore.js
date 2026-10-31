@@ -1569,6 +1569,7 @@ function parseSystems(list) {
         }
         return parseStdStaff(pg, sys.staves[p.std], pg.glyphs, verts, beams, sb, { drums: p.kind === "drums", others: pageStaves, fulls });
       });
+      attachWords(sys, pg, edges, layout, parsed);
       // 코드 이름: 같은 마디에서 가장 가까운 음표·쉼표의 박 위치에 둔다 (없으면 마디 안의 위치 비율로)
       for (const c of chordSymbols(sys, pg, edges)) {
         const i = c.measure, full = fulls[i];
@@ -1943,7 +1944,9 @@ function beatTex(e, kind, strings = 6, perc = false) {
   if (e.tuplet) fx.push(`tu ${e.tuplet}`);
   if (e.tremolo && !e.rest) fx.push("tp 16");
   if (e.ottava && !e.rest && kind !== "drums") fx.push(`ot ${{ 2: "15ma", 1: "8va", "-1": "8vb" }[e.ottava]}`); // 표시만 (음은 이미 소리 나는 높이)
-  if (e.label) fx.push(`txt "${e.label}"`);
+  const words = [e.direction, e.label].filter(Boolean).join(" ");
+  if (words) fx.push(`txt "${words}"`);
+  if (!e.rest) (e.lyrics || []).forEach((s, i) => { if (s) fx.push(i ? `lyrics ${i} "${s}"` : `lyrics "${s}"`); });
   if (e.chord) fx.push(`ch "${e.chord}"`);
   if (kind === "tab" && e.whammy && (e.whammy[0] || e.whammy[1]) && !e.rest) fx.push(`tb (${e.whammy[0] * 2} ${e.whammy[1] * 2})`); // 4분의 1음 단위
   // 음표 효과({t})와 박 효과가 함께 있을 때 헷갈리지 않도록 화음 괄호로 감싼다
@@ -2239,7 +2242,13 @@ export function navigationMarks(sys, glyphs, edges, repeatDots) {
     for (let i = measureAt(v.bbox[0] + 1); i < n && edges[i] < x1 - 5; i++) marks[i].volta = num;
   }
   // 세뇨 / 코다: 보표 위
-  for (const q of glyphs.filter(q => q.cls === "segno" && above(q))) marks[measureAt(q.x)].segno = true;
+  // 세뇨는 마디 맨 앞 마디줄 바로 위에 적히므로, 기호 가운데가 마디줄 근처면 마디줄 뒤의 마디다
+  for (const q of glyphs.filter(q => q.cls === "segno" && above(q))) {
+    const cx = (q.bbox[0] + q.bbox[2]) / 2;
+    let i = measureAt(cx);
+    if (i + 1 < n && edges[i + 1] - cx < 4) i++;
+    marks[i].segno = true;
+  }
   for (const q of glyphs.filter(q => q.cls === "coda" && above(q))) {
     const i = measureAt((q.bbox[0] + q.bbox[2]) / 2);
     const rel = ((q.bbox[0] + q.bbox[2]) / 2 - edges[i]) / (edges[i + 1] - edges[i]);
@@ -2256,6 +2265,113 @@ export function navigationMarks(sys, glyphs, edges, repeatDots) {
 /* ------------------------------------------------- 12) 코드 이름 */
 
 const CHORD_RE = /^(N\.C\.|[A-G][#b]?(?:m|M|maj|min|dim|aug|sus|add|[0-9]|[()#b+\-,])*(?:\/[A-G][#b]?)?)$/;
+
+/**
+ * 보표 위에 꺾쇠로 적은 악기 지시(<Dist.> 등). 글자는 q.lyr(글자 사전), i·l·.은 작은 사각형으로 그려져 있다.
+ * 찾은 글자에는 q.inDirection 표시를 남겨 가사로 다시 읽지 않게 한다.
+ * @returns [{ x, y, s }]
+ */
+export function directionsOf(pg) {
+  const out = [];
+  for (const o of pg.glyphs) {
+    if (o.lyr !== "<") continue;
+    const y = o.bbox[3];
+    const close = pg.glyphs.filter(q => q.lyr === ">" && Math.abs(q.bbox[3] - y) < 1.5 && q.bbox[0] > o.bbox[2] && q.bbox[0] - o.bbox[2] < 90)
+      .sort((a, b) => a.bbox[0] - b.bbox[0])[0];
+    if (!close) continue;
+    const inside = b => b[0] > o.bbox[2] - 0.2 && b[2] < close.bbox[0] + 0.2 && b[1] > y - 7 && b[3] < y + 2;
+    const items = [];
+    for (const q of pg.glyphs) {
+      if (q === o || q === close || !inside(q.bbox)) continue;
+      // 사전에 없는 도형은 같은 글줄에 있는 것만 모르는 글자로 친다 (겹쳐 그려진 음표 등은 건너뜀)
+      if (!q.lyr && Math.abs(q.bbox[3] - y) > 0.8) continue;
+      q.inDirection = true;
+      items.push({ x0: q.bbox[0], x1: q.bbox[2], s: q.lyr || "?" });
+    }
+    o.inDirection = close.inDirection = true;
+    const rects = pg.rects.filter(r => inside([r.x0, r.y0, r.x1, r.y1]) && r.x1 - r.x0 < 1.2).sort((a, b) => a.x0 - b.x0 || a.y0 - b.y0);
+    for (let i = 0; i < rects.length; i++) {
+      const r = rects[i], next = rects[i + 1];
+      if (next && Math.abs(next.x0 - r.x0) < 0.3) { items.push({ x0: r.x0, x1: r.x1, s: "i" }); i++; }
+      else items.push({ x0: r.x0, x1: r.x1, s: r.y1 - r.y0 > 1.5 ? "l" : "." });
+    }
+    items.sort((a, b) => a.x0 - b.x0);
+    let s = "", right = null;
+    for (const it of items) { if (right !== null && it.x0 - right > 0.9) s += " "; s += it.s; right = it.x1; }
+    out.push({ x: o.bbox[0], y, s: `<${s}>` });
+  }
+  return out;
+}
+
+const SMALL_KANA = /^[ぁぃぅぇぉっゃゅょゎァィゥェォッャュョ]$/, LATIN = /^[A-Za-z!]+$/;
+
+/**
+ * 보표 아래 가사. 한 줄(1절·2절…)마다 음표에 붙일 낱말 조각을 왼쪽부터 돌려준다.
+ * 낱글자 영어는 붙어 있는 것끼리, 작은 가나는 앞 글자에 합친다. 장음 "ー"는 얇은 사각형으로 그려져 있다.
+ * @returns [[{ x, s }]]
+ */
+export function lyricsOf(pg, staff, next) {
+  const bottom = next ? next.top : staff.bottom + 24;
+  const inBand = b => b[1] > staff.bottom && b[3] < bottom;
+  const chars = pg.glyphs.filter(q => q.lyr && !q.inDirection && !/^\d+$/.test(q.lyr) && !/[<>]/.test(q.lyr) && inBand(q.bbox))
+    .map(q => ({ x0: q.bbox[0], x1: q.bbox[2], y0: q.bbox[1], y1: q.bbox[3], s: q.lyr }));
+  const rows = [];
+  for (const c of [...chars].sort((a, b) => a.y1 - b.y1)) {
+    const row = rows.find(r => c.y1 - r.y1 < 2.5 && r.y1 - c.y1 < 2.5);
+    if (row) { row.items.push(c); row.y0 = Math.min(row.y0, c.y0); }
+    else rows.push({ y0: c.y0, y1: c.y1, items: [c] });
+  }
+  for (const r of rows) {
+    for (const q of pg.rects) {
+      const w = q.x1 - q.x0, cy = (q.y0 + q.y1) / 2;
+      if (w > 2.5 && w < 6 && q.y1 - q.y0 < 0.8 && cy > r.y0 && cy < r.y1) r.items.push({ x0: q.x0, x1: q.x1, y0: q.y0, y1: q.y1, s: "ー" });
+    }
+  }
+  return rows.map(r => {
+    const out = [];
+    let last = null;
+    for (const c of r.items.sort((a, b) => a.x0 - b.x0)) {
+      const gap = last ? c.x0 - last.x1 : Infinity;
+      if (last && ((SMALL_KANA.test(c.s) && gap < 2) || (LATIN.test(c.s) && LATIN.test(last.s) && gap < 1))) { last.s += c.s; last.x1 = c.x1; }
+      else { last = { x0: c.x0, x1: c.x1, s: c.s }; out.push(last); }
+    }
+    return out.map(c => ({ x: (c.x0 + c.x1) / 2, s: c.s }));
+  });
+}
+
+/** 이 단의 가사와 악기 지시를 음표에 붙인다 */
+function attachWords(sys, pg, edges, layout, parsed) {
+  const measureAt = x => { let i = 0; while (i < edges.length - 2 && x >= edges[i + 1] - 1) i++; return i; };
+  pg.directions ||= directionsOf(pg); // 지시 글자를 먼저 표시해 둔다
+  layout.forEach((p, k) => {
+    if (p.kind !== "std") return;
+    lyricsOf(pg, sys.staves[p.std], sys.staves[p.std + 1]).forEach((chunks, row) => {
+      for (const c of chunks) {
+        const notes = (parsed[k][measureAt(c.x)] || []).filter(e => !e.rest);
+        let best = null;
+        for (const e of notes) if (!best || Math.abs(e.x - c.x) < Math.abs(best.x - c.x)) best = e;
+        if (!best || Math.abs(best.x - c.x) > 14) continue;
+        const words = best.lyrics ||= [];
+        words[row] = (words[row] || "") + c.s;
+      }
+    });
+  });
+  const top = sys.staves[0].top - 30, end = sys.staves[sys.staves.length - 1].bottom;
+  for (const d of pg.directions) {
+    if (d.y < top || d.y > end) continue;
+    const idx = sys.staves.findIndex(st => st.top > d.y - 1);
+    const k = layout.findIndex(p => p.std === idx || p.tab === idx || p.lower === idx);
+    if (k < 0) continue;
+    for (let i = measureAt(d.x); i < edges.length - 1; i++) {
+      const evs = parsed[k][i] || [];
+      if (!evs.length) continue;
+      let best = evs[0];
+      for (const e of evs) if (Math.abs(e.x - d.x) < Math.abs(best.x - d.x)) best = e;
+      best.direction = best.direction ? `${best.direction} ${d.s}` : d.s;
+      break;
+    }
+  }
+}
 
 /**
  * 단 맨 위 보표 바로 위에 적힌 코드 이름. 글자는 도형으로 그린 것(q.ch, 숫자는 q.cls "d0"~"d9")이나 PDF 글자.

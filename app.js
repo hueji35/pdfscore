@@ -143,6 +143,7 @@
     pdfjs.GlobalWorkerOptions.workerSrc = new URL("lib/pdfjs/pdf.worker.min.mjs", location.href).href;
     const labelLetter = B.uprightClassifier((await import("./labelshapes.js")).LABEL_SHAPES);
     const classify = B.makeClassifier(SHAPES), chordLetter = B.makeClassifier(CHORD_SHAPES);
+    const lyricLetter = (await import("./lyricshapes.js")).lyricClassifier();
     // 악보 글꼴로 찍은 기호(피아노 악보 등)의 윤곽을 받기 위한 옵션 포함
     const doc = await pdfjs.getDocument({ data: new Uint8Array(await file.arrayBuffer()), ...DOC_OPTIONS }).promise;
     const pages = [];
@@ -167,6 +168,8 @@
           if (!g.cls && !g.text) g.ch = s.ch !== undefined ? s.ch : (s.ch = chordLetter(g.segs));
           // 세로로 쓴 파트 이름 글자 (다른 기호로 분류된 것도 글자로 읽어 둔다)
           if (g.bbox[2] - g.bbox[0] < 12 && g.bbox[3] - g.bbox[1] < 12) g.lbl = s.lbl !== undefined ? s.lbl : (s.lbl = labelLetter(g.segs));
+          // 윤곽선으로 그린 가사·악기 지시 글자
+          if (!g.text && g.bbox[3] - g.bbox[1] < 12) g.lyr = s.lyr !== undefined ? s.lyr : (s.lyr = lyricLetter(g.segs));
         }
         pages.push(pg);
         if (i === Math.min(3, doc.numPages) && !B.looksLikeBandScore(pages)) return false; // 앞 몇 쪽으로 판단
