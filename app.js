@@ -146,16 +146,28 @@
     // 악보 글꼴로 찍은 기호(피아노 악보 등)의 윤곽을 받기 위한 옵션 포함
     const doc = await pdfjs.getDocument({ data: new Uint8Array(await file.arrayBuffer()), ...DOC_OPTIONS }).promise;
     const pages = [];
+    // 같은 모양은 한 번만 판별하고 윤곽도 하나만 남긴다 (악보 한 곡에 같은 기호가 수만 개 나온다)
+    const known = new Map();
+    const shapeOf = g => {
+      let s = known.get(g.sig);
+      if (!s) known.set(g.sig, s = { segs: g.segs, cls: classify(g.segs) });
+      g.segs = s.segs;
+      return s;
+    };
     try {
       for (let i = 1; i <= doc.numPages; i++) {
         showOverlay(`PDF 악보 데이터 읽는 중… ${i}/${doc.numPages}쪽`);
-        const pg = await extractPage(pdfjs, await doc.getPage(i));
+        const page = await doc.getPage(i);
+        const pg = await extractPage(pdfjs, page);
+        page.cleanup();
         for (const g of pg.glyphs) {
-          g.cls = classify(g.segs);
-          if (!g.cls && !g.text) g.ch = chordLetter(g.segs); // 코드 이름 글자 (다른 기호로 분류되지 않은 것만)
+          const s = shapeOf(g);
+          g.cls = s.cls;
+          // 코드 이름 글자 (다른 기호로 분류되지 않은 것만)
+          if (!g.cls && !g.text) g.ch = s.ch !== undefined ? s.ch : (s.ch = chordLetter(g.segs));
+          // 세로로 쓴 파트 이름 글자 (다른 기호로 분류된 것도 글자로 읽어 둔다)
+          if (g.bbox[2] - g.bbox[0] < 12 && g.bbox[3] - g.bbox[1] < 12) g.lbl = s.lbl !== undefined ? s.lbl : (s.lbl = labelLetter(g.segs));
         }
-        // 세로로 쓴 파트 이름 글자 (다른 기호로 분류된 것도 글자로 읽어 둔다)
-        for (const g of pg.glyphs) if (g.bbox[2] - g.bbox[0] < 12 && g.bbox[3] - g.bbox[1] < 12) g.lbl = labelLetter(g.segs);
         pages.push(pg);
         if (i === Math.min(3, doc.numPages) && !B.looksLikeBandScore(pages)) return false; // 앞 몇 쪽으로 판단
       }
@@ -288,9 +300,13 @@
     const old = engines; engines = [];
     for (const p of old) p.then(r => r.dispose()).catch(() => {});
   }
+  // 폰·태블릿이나 메모리가 적은 기기
+  function lowEndDevice() {
+    return matchMedia("(pointer: coarse)").matches || (navigator.deviceMemory && navigator.deviceMemory < 8);
+  }
   // 여러 페이지는 PC에서 엔진 두 개로 동시에 읽는다 (폰은 메모리 때문에 하나)
   function engineCount(pages) {
-    const mobile = matchMedia("(pointer: coarse)").matches || (navigator.deviceMemory && navigator.deviceMemory < 8);
+    const mobile = lowEndDevice();
     const forced = +new URLSearchParams(location.search).get("engines"); // 시험용: ?engines=3
     if (forced > 0) return Math.min(forced, Math.max(1, pages));
     return pages > 1 && !mobile ? 2 : 1;
@@ -473,7 +489,11 @@
     omrRunning = true;
     omrAbort = new AbortController();
     try { await runOmr(file, omrAbort.signal); }
-    finally { omrRunning = false; setOmrBar(null); }
+    finally {
+      omrRunning = false;
+      setOmrBar(null);
+      if (lowEndDevice()) resetEngines(); // 다 읽은 뒤 모델이 메모리를 계속 차지하지 않게
+    }
   }
 
   async function runOmr(file, signal) {
@@ -1173,11 +1193,18 @@
     p.gain.gain.setTargetAtTime(v, ctx.currentTime, 0.015);
   }
 
+  // MIDI 번호 → 음색 파일의 음 이름 (60 → C4)
+  const midiName = m => ["C", "Db", "D", "Eb", "E", "F", "Gb", "G", "Ab", "A", "Bb", "B"][m % 12] + (Math.floor(m / 12) - 1);
+
   async function loadPartSound(p) {
     ensureAudio();
     if (!p.gain) { p.gain = ctx.createGain(); p.gain.connect(master); applyGain(p); }
     p.player = null;
     if (p.program === DRUMS) return; // 타악기는 내장 합성음
+    // 이 파트가 실제로 쓰는 음만 푼다 (88음을 모두 풀면 피아노 한 대에 100MB가 넘는다)
+    const idx = state.parts.indexOf(p);
+    const notes = [...new Set(state.events.filter(e => e.part === idx).map(e => e.midi))].map(midiName);
+    if (!notes.length) return;
     const token = ++p.loadingToken;
     p.li && p.li.classList.add("loading");
     const name = GM[p.program];
@@ -1187,7 +1214,7 @@
     for (const url of urls) {
       try {
         const player = await Soundfont.instrument(ctx, name, {
-          destination: p.gain, nameToUrl: () => url, gain: 2.2,
+          destination: p.gain, nameToUrl: () => url, gain: 2.2, notes,
         });
         if (token !== p.loadingToken) return;
         p.player = player;
@@ -1474,6 +1501,7 @@
   const tab = window.createTabMode({
     ui, toast, escapeHtml, hideOverlay, GM,
     fileName: () => fileName,
+    lowEnd: lowEndDevice,
     alert: (title, msg) => alertBox(title, `<p>${escapeHtml(msg)}</p>`),
     status: msg => setOmrBar(msg),
     baseTempo: bpm => setBaseTempo(bpm),
@@ -1509,9 +1537,11 @@
   };
   // 화면 전체는 스크롤하지 않는다 (포커스 이동 등으로 밀려 내려가면 도구 막대에 닿을 수 없게 됨)
   window.addEventListener("scroll", () => { if (window.scrollX || window.scrollY) window.scrollTo(0, 0); });
-  const isTouch = matchMedia("(pointer: coarse)").matches;
-  if (!isTouch && /^https?:$/.test(location.protocol)) setTimeout(warmUpEngine, 3000);
-  ui.file.parentElement.addEventListener("click", () => warmUpEngine());
+  // 엔진 미리 준비는 PC에서만: 모델이 100MB가 넘어, 폰·태블릿은 정말 인식할 때만 불러온다
+  if (!lowEndDevice()) {
+    if (/^https?:$/.test(location.protocol)) setTimeout(warmUpEngine, 3000);
+    ui.file.parentElement.addEventListener("click", () => warmUpEngine());
+  }
   window.addEventListener("dragenter", () => warmUpEngine());
   ui.file.onchange = () => { openFile(ui.file.files[0]); ui.file.value = ""; };
   ui.play.onclick = () => (tab.active ? tab.toggle() : state.playing ? pause() : play());

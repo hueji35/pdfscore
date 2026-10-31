@@ -34,6 +34,8 @@ window.createTabMode = function (h) {
         enableCursor: true,
         enableAnimatedBeatCursor: true,
         enableUserInteraction: true, // 악보를 누르면 그 위치로 이동
+        // 느린 기기는 소리를 더 넉넉히 미리 만들어 끊김을 줄인다 (기본 500ms)
+        ...(h.lowEnd() ? { bufferTimeInMilliseconds: 1000 } : {}),
       },
     };
   }
@@ -50,9 +52,6 @@ window.createTabMode = function (h) {
       document.title = (score.title || h.fileName() || "악보") + " — PDFScore";
       buildParts();
       if (ready) applyAllAudio();
-      // alphaTab은 기본으로 첫 트랙만 그리므로 보이는 트랙을 모두 그리게 한다
-      const shown = parts.filter(p => p.visible).map(p => p.track);
-      if (tracks.length > 1) setTimeout(() => api.renderTracks(shown), 0);
     });
     api.renderFinished.on(() => h.hideOverlay());
     api.soundFontLoad.on(e => {
@@ -249,7 +248,9 @@ window.createTabMode = function (h) {
     for (const k of ["EffectHarmonics", "EffectHammerOnPullOffText"]) els.set(E[k], !fromPdf); // 원본에 없는 N.H.·H 글자
     api.updateSettings();
     armOff(score);
-    api.renderScore(score);
+    // alphaTab은 기본으로 첫 트랙만 그리므로, 보이는 트랙을 처음부터 지정해 한 번만 그리게 한다
+    const old = keep && keep.length === score.tracks.length ? keep : null;
+    api.renderScore(score, score.tracks.map((_, i) => i).filter(i => !old || old[i].visible));
     return score !== original;
   }
 
