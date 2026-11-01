@@ -218,7 +218,11 @@ export async function extractPage(pdfjs, page) {
           const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]);
           const b = [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)];
           if (r) rects.push({ x0: b[0], y0: b[1], x1: b[2], y1: b[3], fill });
-          else polys.push({ pts, bbox: b, curved: cur.some(g => g.op === 2), fill });
+          else {
+            const curved = cur.some(g => g.op === 2);
+            // 작은 곡선 도형은 가사 글자일 수 있어 윤곽을 남긴다
+            polys.push({ pts, bbox: b, curved, fill, ...(curved && b[2] - b[0] < 14 && b[3] - b[1] < 9 ? { segs: cur } : {}) });
+          }
           cur = [];
         };
         for (const g of segs) { if (g.op === 0) flush(); cur.push(g); }

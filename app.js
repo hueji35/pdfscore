@@ -171,6 +171,7 @@
           // 윤곽선으로 그린 가사·악기 지시 글자
           if (!g.text && g.bbox[3] - g.bbox[1] < 12) g.lyr = s.lyr !== undefined ? s.lyr : (s.lyr = lyricLetter(g.segs));
         }
+        for (const p of pg.polys) if (p.segs) p.lyr = lyricLetter(p.segs);
         pages.push(pg);
         if (i === Math.min(3, doc.numPages) && !B.looksLikeBandScore(pages)) return false; // 앞 몇 쪽으로 판단
       }

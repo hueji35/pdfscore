@@ -200,9 +200,9 @@ window.createTabMode = function (h) {
       copies.forEach((bar, k) => {
         const pass = passes.get(order[k]) || 0;
         passes.set(order[k], pass + 1);
-        for (const v of bar.voices) for (const b of v.beats) {
-          if (b.lyrics && b.lyrics.length > 1) b.lyrics = [b.lyrics[Math.min(pass, b.lyrics.length - 1)] || ""];
-        }
+        const beats = bar.voices.flatMap(v => v.beats);
+        const rows = Math.max(0, ...beats.map(b => b.lyrics ? b.lyrics.length : 0));
+        if (rows > 1) for (const b of beats) if (b.lyrics) b.lyrics = [b.lyrics[Math.min(pass, rows - 1)] || ""];
       });
       const ids = copies.map(bar => {
         const map = new Map();

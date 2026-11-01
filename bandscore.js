@@ -2315,6 +2315,9 @@ export function lyricsOf(pg, staff, next) {
   const inBand = b => b[1] > staff.bottom && b[3] < bottom;
   const chars = pg.glyphs.filter(q => q.lyr && !q.inDirection && !/^\d+$/.test(q.lyr) && !/[<>]/.test(q.lyr) && inBand(q.bbox))
     .map(q => ({ x0: q.bbox[0], x1: q.bbox[2], y0: q.bbox[1], y1: q.bbox[3], s: q.lyr }));
+  // 도형 기호가 아니라 페이지 좌표로 바로 그린 글자 (こ는 윗획이 사각형, 아랫획이 곡선 도형이다)
+  for (const p of pg.polys) if (p.lyr && inBand(p.bbox)) chars.push({ x0: p.bbox[0], x1: p.bbox[2], y0: p.bbox[1], y1: p.bbox[3], s: p.lyr });
+  const isStrokeOfKo = q => chars.some(c => c.s === "こ" && q.x0 >= c.x0 - 1 && q.x1 <= c.x1 + 1 && q.y1 <= c.y0 && c.y0 - q.y1 < 4);
   const rows = [];
   for (const c of [...chars].sort((a, b) => a.y1 - b.y1)) {
     const row = rows.find(r => c.y1 - r.y1 < 2.5 && r.y1 - c.y1 < 2.5);
@@ -2324,7 +2327,17 @@ export function lyricsOf(pg, staff, next) {
   for (const r of rows) {
     for (const q of pg.rects) {
       const w = q.x1 - q.x0, cy = (q.y0 + q.y1) / 2;
-      if (w > 2.5 && w < 6 && q.y1 - q.y0 < 0.8 && cy > r.y0 && cy < r.y1) r.items.push({ x0: q.x0, x1: q.x1, y0: q.y0, y1: q.y1, s: "ー" });
+      if (w > 2.5 && w < 6 && q.y1 - q.y0 < 0.8 && cy > r.y0 && cy < r.y1 && !isStrokeOfKo(q)) r.items.push({ x0: q.x0, x1: q.x1, y0: q.y0, y1: q.y1, s: "ー" });
+    }
+    // 영어의 i·l은 사각형으로 그려져 있다 (i는 점과 획 두 개). 영어 글자 바로 옆의 것만 글자로 친다
+    const thin = pg.rects.filter(q => q.x1 - q.x0 < 1.2 && q.y0 > r.y0 - 1 && q.y1 < r.y1 + 0.5).sort((a, b) => a.x0 - b.x0 || a.y0 - b.y0);
+    const latin = r.items.filter(c => LATIN.test(c.s));
+    for (let i = 0; i < thin.length; i++) {
+      const q = thin[i], dot = thin[i + 1] && Math.abs(thin[i + 1].x0 - q.x0) < 0.3;
+      if (dot) i++;
+      if (latin.some(c => Math.abs(c.x0 - q.x1) < 1.5 || Math.abs(q.x0 - c.x1) < 1.5) || (thin[i + 1] && thin[i + 1].x0 - q.x1 < 1.5 && latin.length)) {
+        r.items.push({ x0: q.x0, x1: q.x1, y0: q.y0, y1: q.y1, s: dot ? "i" : "l" });
+      }
     }
   }
   return rows.map(r => {
@@ -2332,7 +2345,10 @@ export function lyricsOf(pg, staff, next) {
     let last = null;
     for (const c of r.items.sort((a, b) => a.x0 - b.x0)) {
       const gap = last ? c.x0 - last.x1 : Infinity;
-      if (last && ((SMALL_KANA.test(c.s) && gap < 2) || (LATIN.test(c.s) && LATIN.test(last.s) && gap < 1))) { last.s += c.s; last.x1 = c.x1; }
+      if (c.s === "ー" && last && LATIN.test(last.s)) continue; // 영어 음절 사이의 붙임표
+      // 묶어 그린 낱말 안쪽에 따로 찍힌 글자가 끼어 있으면 마지막 글자 앞에 넣는다
+      if (last && LATIN.test(c.s) && LATIN.test(last.s) && c.x1 < last.x1) last.s = last.s.slice(0, -1) + c.s + last.s.slice(-1);
+      else if (last && ((SMALL_KANA.test(c.s) && gap < 2) || (LATIN.test(c.s) && LATIN.test(last.s) && gap < 1))) { last.s += c.s; last.x1 = c.x1; }
       else { last = { x0: c.x0, x1: c.x1, s: c.s }; out.push(last); }
     }
     return out.map(c => ({ x: (c.x0 + c.x1) / 2, s: c.s }));
@@ -2350,7 +2366,8 @@ function attachWords(sys, pg, edges, layout, parsed) {
         const notes = (parsed[k][measureAt(c.x)] || []).filter(e => !e.rest);
         let best = null;
         for (const e of notes) if (!best || Math.abs(e.x - c.x) < Math.abs(best.x - c.x)) best = e;
-        if (!best || Math.abs(best.x - c.x) > 14) continue;
+        // 멀리 떨어진 글자는 가사 줄일 때만 붙인다 (괄호 음표를 건너뛴 음절은 살리고, "tacet" 같은 지시는 뺀다)
+        if (!best || (Math.abs(best.x - c.x) > 14 && chunks.length < 3)) continue;
         const words = best.lyrics ||= [];
         words[row] = (words[row] || "") + c.s;
       }
