@@ -75,7 +75,7 @@ window.createTabMode = function (h) {
     const old = keep && keep.length === tracks.length ? keep : null;
     parts = tracks.map((t, i) => ({ track: t, visible: true, audible: true, volume: 1, index: i, ...(old && old[i]) }));
     keep = null;
-    for (const p of parts) if (p.program !== undefined) p.track.playbackInfo.program = p.program;
+    for (const p of parts) if (p.program !== undefined) applyProgram(p.track, p.program);
     ui.partList.innerHTML = "";
     parts.forEach((p, i) => {
       const drum = p.track.staves.some(s => s.isPercussion);
@@ -112,13 +112,19 @@ window.createTabMode = function (h) {
     clearTimeout(renderTimer);
     renderTimer = setTimeout(() => api.renderTracks(parts.filter(x => x.visible).map(x => x.track)), 60);
   }
+  // 박마다 적힌 악기 지정이 트랙의 프로그램을 덮어쓰므로 함께 바꾼다
+  function applyProgram(track, program) {
+    track.playbackInfo.program = program;
+    for (const st of track.staves) for (const bar of st.bars) for (const v of bar.voices) for (const b of v.beats)
+      for (const a of b.automations) if (a.type === alphaTab.model.AutomationType.Instrument) a.value = program;
+  }
   // 음색 바꾸기: 트랙의 프로그램을 바꾸고 재생 데이터를 다시 만든다 (재생 위치는 그대로)
   function setProgram(i, program) {
     const p = parts[i];
     p.program = program;
-    p.track.playbackInfo.program = program;
+    applyProgram(p.track, program);
     const t = original && original.tracks[p.index];
-    if (t) t.playbackInfo.program = program; // 반복 펼치기를 바꿔 다시 그려도 유지
+    if (t) applyProgram(t, program); // 반복 펼치기를 바꿔 다시 그려도 유지
     const at = api.tickPosition, was = playing;
     if (was) api.pause();
     // 새 재생 데이터를 신스가 받으면 "멈춤" 상태가 오고 위치가 처음으로 돌아간다. 그 뒤에 위치를 되돌리고 이어서 재생
