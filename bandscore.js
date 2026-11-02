@@ -128,14 +128,18 @@ export function systemBarlines(sys, verts) {
     else clusters.push({ x: b.x, x1: b.x1, staves: new Set([b.k]), thick: b.thick, double: b.double });
   }
   const n = sys.staves.length;
-  if (n > 3) return clusters.filter(c => c.staves.size >= Math.ceil(n / 2));
-  // 피아노 등 보표가 적은 단: 기둥도 보표 높이를 덮을 수 있으므로 더 엄격하게.
-  // 단 전체(맨 위 보표 꼭대기~맨 아래 보표 바닥)를 잇는 한 줄이거나, 모든 보표에서 보표 높이에 딱 맞는 선
-  const fits = (st, v) => v.y0 >= st.top - 1.5 && v.y1 <= st.bottom + 1.5;
+  // 기둥도 보표 높이를 덮을 수 있으므로 양 끝이 보표 경계에 딱 맞는 선만 마디줄로 본다
+  // (보컬은 따로, 대보표는 두 보표를 잇는 한 줄로 그은 단도 있다)
+  const fits = v => sys.staves.some(a => Math.abs(v.y0 - a.top) <= 1.5) && sys.staves.some(a => Math.abs(v.y1 - a.bottom) <= 1.5);
+  const fitted = (st, vs) => vs.some(v => v.y0 <= st.top + 0.3 && v.y1 >= st.bottom - 0.3 && fits(v));
+  const linesAt = c => verts.filter(v => v.x >= c.x - 0.8 && v.x <= c.x1 + 0.8);
+  // 여러 보표의 기둥이 우연히 같은 x에 놓이면 절반을 넘길 수 있다
+  if (n > 3) return clusters.filter(c => c.staves.size >= Math.ceil(n / 2) && sys.staves.filter(st => fitted(st, linesAt(c))).length >= Math.ceil(n / 2));
+  // 피아노 등 보표가 적은 단: 단 전체(맨 위 보표 꼭대기~맨 아래 보표 바닥)를 잇는 한 줄이거나, 모든 보표에서 경계에 딱 맞는 선
   return clusters.filter(c => {
-    const vs = verts.filter(v => v.x >= c.x - 0.8 && v.x <= c.x1 + 0.8);
+    const vs = linesAt(c);
     if (n > 1 && vs.some(v => v.y0 <= sys.top + 0.5 && v.y1 >= sys.bottom - 0.5)) return true;
-    return sys.staves.every(st => vs.some(v => v.y0 <= st.top + 0.3 && v.y1 >= st.bottom - 0.3 && fits(st, v)));
+    return sys.staves.every(st => fitted(st, vs));
   });
 }
 
@@ -1281,6 +1285,14 @@ function systemSig(sys) {
   return sys.staves.map(s => (s.gap / stdGap > 1.15 ? "T" : "S") + s.count).join("");
 }
 
+/** 보표 구성 sig가 main에서 보표 몇 개만 뺀 꼴인가 */
+function isReducedSig(sig, main) {
+  const want = sig.match(/[ST]\d+/g), have = main.match(/[ST]\d+/g);
+  let k = 0;
+  for (const s of have) if (s === want[k]) k++;
+  return k === want.length && want.length < have.length;
+}
+
 /**
  * 페이지들(기호 분류가 끝난 extractPage 결과)을 파트별 마디 목록으로.
  * 가장 많이 나오는 보표 구성의 단들을 본편으로 보고, 구성이 다른 단(키보드 파트 부록 등)은
@@ -1359,15 +1371,22 @@ export function parseBandScore(pages) {
   const maxStaves = Math.max(0, ...sysOf.flat().map(s => s.staves.length));
   const minStaves = maxStaves > 3 ? 4 : Math.min(2, maxStaves);
   sysOf.forEach((list, pi) => {
-    for (const sys of list.filter(s => s.staves.length >= minStaves)) all.push({ pg: pages[pi], pi, sys, sig: systemSig(sys) });
+    for (const sys of list.filter(s => s.staves.length >= Math.min(2, maxStaves))) all.push({ pg: pages[pi], pi, sys, sig: systemSig(sys), full: sys.staves.length >= minStaves });
   });
   const count = {};
-  for (const e of all) count[e.sig] = (count[e.sig] || 0) + 1;
+  for (const e of all) if (e.full) count[e.sig] = (count[e.sig] || 0) + 1;
   const mainSig = Object.keys(count).sort((a, b) => count[b] - count[a])[0];
-  const main = parseSystems(all.filter(e => e.sig === mainSig));
+  // 본편 사이에 낀 단이 본편의 보표 일부만 그렸으면 쉬는 파트를 숨긴 본편이다. 맨 끝 단은 부록과 구별할 수 없어 넣지 않는다
+  const lastMain = all.reduce((last, e, k) => (e.sig === mainSig ? k : last), -1);
+  const model = all[lastMain];
+  const reduced = (e, k) => k < lastMain && e.sig !== mainSig && isReducedSig(e.sig, mainSig) && e.sys.x1 - e.sys.x0 > (model.sys.x1 - model.sys.x0) * 0.8;
+  const inMain = all.filter((e, k) => e.sig === mainSig || reduced(e, k));
+  const main = parseSystems(inMain);
   extendVoltas(main.bars);
   markAnacrusis(main);
-  const rest = all.filter(e => e.sig !== mainSig);
+  const rest = all.filter(e => e.full && !inMain.includes(e));
+  const left = all.filter(e => !e.full && !inMain.includes(e) && isReducedSig(e.sig, mainSig) && e.sys.x1 - e.sys.x0 > (model.sys.x1 - model.sys.x0) * 0.8).length;
+  if (left) main.report.push(`본편 뒤에 보표가 적은 ${left}단이 있어 뺐습니다.`);
   if (rest.length) {
     const extra = parseSystems(rest);
     const map = alignSections(main.bars, extra.bars);
