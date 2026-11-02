@@ -2283,6 +2283,8 @@ export function navigationMarks(sys, glyphs, edges, repeatDots) {
 
 /* ------------------------------------------------- 12) 코드 이름 */
 
+// 근음과 따로 찍힌 뒷조각 ("D" + "M7", "C" + "#" + "m7" + "(" + "b" + "5" + ")")
+const CHORD_TAIL = /^(?:m|M|maj|min|dim|aug|sus|add|[0-9]|[()#b+\-,]|\/[A-G][#b]?)+$/;
 const CHORD_RE = /^(N\.C\.|[A-G][#b]?(?:m|M|maj|min|dim|aug|sus|add|[0-9]|[()#b+\-,])*(?:\/[A-G][#b]?)?)$/;
 
 /**
@@ -2329,11 +2331,14 @@ const SMALL_KANA = /^[ぁぃぅぇぉっゃゅょゎァィゥェォッャュョ]
  * 낱글자 영어는 붙어 있는 것끼리, 작은 가나는 앞 글자에 합친다. 장음 "ー"는 얇은 사각형으로 그려져 있다.
  * @returns [[{ x, s }]]
  */
+const HANGUL = /^[가-힣]$/;
 export function lyricsOf(pg, staff, next) {
   const bottom = next ? next.top : staff.bottom + 24;
   const inBand = b => b[1] > staff.bottom && b[3] < bottom;
-  const chars = pg.glyphs.filter(q => q.lyr && !q.inDirection && !/^\d+$/.test(q.lyr) && !/[<>]/.test(q.lyr) && inBand(q.bbox))
-    .map(q => ({ x0: q.bbox[0], x1: q.bbox[2], y0: q.bbox[1], y1: q.bbox[3], s: q.lyr }));
+  // 글꼴을 넣어 찍은 한글은 윤곽을 읽을 필요 없이 글자 코드를 쓴다
+  const textOf = q => q.lyr || (q.text && HANGUL.test(q.uni || "") ? q.uni : null);
+  const chars = pg.glyphs.filter(q => textOf(q) && !q.inDirection && !/^\d+$/.test(textOf(q)) && !/[<>]/.test(textOf(q)) && inBand(q.bbox))
+    .map(q => ({ x0: q.bbox[0], x1: q.bbox[2], y0: q.bbox[1], y1: q.bbox[3], s: textOf(q) }));
   // 도형 기호가 아니라 페이지 좌표로 바로 그린 글자 (こ는 윗획이 사각형, 아랫획이 곡선 도형이다)
   for (const p of pg.polys) if (p.lyr && inBand(p.bbox)) chars.push({ x0: p.bbox[0], x1: p.bbox[2], y0: p.bbox[1], y1: p.bbox[3], s: p.lyr });
   const isStrokeOfKo = q => chars.some(c => c.s === "こ" && q.x0 >= c.x0 - 1 && q.x1 <= c.x1 + 1 && q.y1 <= c.y0 && c.y0 - q.y1 < 4);
@@ -2344,6 +2349,7 @@ export function lyricsOf(pg, staff, next) {
     else rows.push({ y0: c.y0, y1: c.y1, items: [c] });
   }
   for (const r of rows) {
+    if (r.items.some(c => HANGUL.test(c.s))) continue;
     for (const q of pg.rects) {
       const w = q.x1 - q.x0, cy = (q.y0 + q.y1) / 2;
       if (w > 2.5 && w < 6 && q.y1 - q.y0 < 0.8 && cy > r.y0 && cy < r.y1 && !isStrokeOfKo(q)) r.items.push({ x0: q.x0, x1: q.x1, y0: q.y0, y1: q.y1, s: "ー" });
@@ -2384,7 +2390,9 @@ function attachWords(sys, pg, edges, layout, parsed) {
       for (const c of chunks) {
         const notes = (parsed[k][measureAt(c.x)] || []).filter(e => !e.rest);
         let best = null;
-        for (const e of notes) if (!best || Math.abs(e.x - c.x) < Math.abs(best.x - c.x)) best = e;
+        // 두 성부가 같은 박에 있으면 윗성부에 붙인다
+        const dist = e => Math.abs(e.x - c.x) + ((e.voice || 1) > 1 ? 1 : 0);
+        for (const e of notes) if (!best || dist(e) < dist(best)) best = e;
         // 멀리 떨어진 글자는 가사 줄일 때만 붙인다 (괄호 음표를 건너뛴 음절은 살리고, "tacet" 같은 지시는 뺀다)
         if (!best || (Math.abs(best.x - c.x) > 14 && chunks.length < 3)) continue;
         const words = best.lyrics ||= [];
@@ -2424,13 +2432,14 @@ export function chordSymbols(sys, pg, edges) {
   }
   for (const t of pg.texts || []) {
     const b = [t.x, t.y - t.size * 0.7, t.x + t.str.trim().length * t.size * 0.55, t.y];
-    if (near(b) && CHORD_RE.test(t.str.trim())) letters.push({ s: t.str.trim(), b });
+    if (near(b) && (CHORD_RE.test(t.str.trim()) || CHORD_TAIL.test(t.str.trim()))) letters.push({ s: t.str.trim(), b, tail: !CHORD_RE.test(t.str.trim()) });
   }
   // 이어진 글자를 낱말로 (위첨자 "(9)"처럼 조금 떠 있는 글자도 세로로 겹치면 같은 낱말)
   const words = [];
   for (const l of letters.sort((a, b) => a.b[0] - b.b[0])) {
     const h = l.b[3] - l.b[1];
-    const w = words.find(w => l.b[0] - w.b[2] < Math.max(2.5, h * 0.7) && l.b[0] - w.b[2] > -1 && l.b[1] < w.b[3] - 0.5 && l.b[3] > w.b[1] + 0.5);
+    // 뒷조각의 글자 폭은 어림값이라 앞 글자와 겹쳐 보일 수 있다
+    const w = words.find(w => l.b[0] - w.b[2] < Math.max(2.5, h * 0.7) && (l.tail || l.b[0] - w.b[2] > -1) && l.b[1] < w.b[3] - 0.5 && l.b[3] > w.b[1] + 0.5);
     if (w) { w.s += l.s; w.b = [w.b[0], Math.min(w.b[1], l.b[1]), Math.max(w.b[2], l.b[2]), Math.max(w.b[3], l.b[3])]; }
     else words.push({ s: l.s, b: [...l.b] });
   }
@@ -2442,9 +2451,11 @@ export function chordSymbols(sys, pg, edges) {
   }
   const out = [];
   for (const w of words) {
-    if (w.used || !CHORD_RE.test(w.s) || w.b[0] < edges[0] - 4 || w.b[0] > edges[n]) continue;
+    if (w.used || !(CHORD_RE.test(w.s) || /^\/[A-G][#b]?$/.test(w.s)) || w.b[0] < edges[0] - 4 || w.b[0] > edges[n]) continue;
     let i = 0;
     while (i < n - 1 && w.b[0] >= edges[i + 1] - 2) i++;
+    // 첫 음 위 가운데에 맞춘 긴 이름은 마디줄 왼쪽에서 시작한다
+    if (i < n - 1 && (w.b[0] + w.b[2]) / 2 > edges[i + 1]) { i++; w.b[0] = edges[i]; }
     out.push({ x: w.b[0], name: w.s, measure: i });
   }
   return out;
