@@ -2472,8 +2472,9 @@ function attachWords(sys, pg, edges, layout, parsed) {
         // 두 성부가 같은 박에 있으면 윗성부에 붙인다
         const dist = e => Math.abs(e.x - c.x) + ((e.voice || 1) > 1 ? 1 : 0);
         for (const e of notes) if (!best || dist(e) < dist(best)) best = e;
-        // 멀리 떨어진 글자는 가사 줄일 때만 붙인다 (괄호 음표를 건너뛴 음절은 살리고, "tacet" 같은 지시는 뺀다)
-        if (!best || (Math.abs(best.x - c.x) > 14 && chunks.length < 3)) continue;
+        // 멀리 떨어진 글자는 가사 줄이거나 한글·가나·한자일 때만 붙인다
+        // (괄호 음표를 건너뛴 음절, 단 끝에 홀로 적힌 못갖춘마디 가사는 살리고, "tacet" 같은 지시는 뺀다)
+        if (!best || (Math.abs(best.x - c.x) > 14 && chunks.length < 3 && !/[぀-ヿ一-鿿가-힣]/.test(c.s))) continue;
         const words = best.lyrics ||= [];
         words[row] = (words[row] || "") + c.s;
       }
