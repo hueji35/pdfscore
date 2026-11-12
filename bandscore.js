@@ -20,7 +20,7 @@ export function isWhite(fill) {
 /** 가로로 긴 얇은 사각형 = 오선 줄. 같은 x 범위에서 일정한 간격으로 이어지는 줄을 묶는다 */
 export function findStaves(page) {
   const raw = page.rects
-    .filter(r => !isWhite(r.fill) && r.y1 - r.y0 < 0.9 && r.x1 - r.x0 > 40)
+    .filter(r => !isWhite(r.fill) && r.y1 - r.y0 < 0.9 && r.x1 - r.x0 > 3) // TAB 줄은 숫자 자리마다 짧게 끊겨 있다
     .map(r => ({ x0: r.x0, x1: r.x1, y: (r.y0 + r.y1) / 2, gaps: [] }))
     .sort((a, b) => a.y - b.y || a.x0 - b.x0);
   // 가운데가 비어 끊긴 보표 줄(코다 앞 빈칸 등)은 하나로 잇고 빈칸 위치를 기억한다
@@ -32,12 +32,19 @@ export function findStaves(page) {
     const grp = raw.slice(i, j).sort((a, b) => a.x0 - b.x0);
     const merged = [];
     for (const l of grp) {
-      const last = merged[merged.length - 1];
       // 마디마다 끊어 그린 오선(맞붙은 조각)은 빈칸이 아니다
-      if (last && l.x0 > last.x1 - 1 && l.x0 - last.x1 < 30) { if (l.x0 - last.x1 > 1) last.gaps.push([last.x1, l.x0]); last.x1 = l.x1; last.y = (last.y + l.y) / 2; }
-      else merged.push({ ...l, gaps: [] });
+      // 짧은 조각(TAB 숫자 사이)은 높이가 같고 숫자 하나 폭만큼 떨어진 것만 잇는다.
+      // 같은 높이 근처의 점선 등이 끼어도 오선이 끊기지 않게, 이을 수 있는 줄 가운데 가장 가까운 것에 잇는다
+      const joins = m => {
+        const short = l.x1 - l.x0 <= 40 || m.x1 - m.x0 <= 40;
+        return l.x0 > m.x1 - 1 && l.x0 - m.x1 < (short ? 14 : 30) && (!short || Math.abs(l.y - m.y) < 0.3);
+      };
+      const last = merged.filter(joins).sort((a, b) => (l.x0 - a.x1) - (l.x0 - b.x1))[0];
+      if (last) { if (l.x0 - last.x1 > 1) last.gaps.push([last.x1, l.x0]); last.x1 = l.x1; last.y = (last.y + l.y) / 2; last.ink += l.x1 - l.x0; }
+      else merged.push({ ...l, gaps: [], ink: l.x1 - l.x0 });
     }
-    lines.push(...merged);
+    // 나란히 놓인 덧줄들은 띄엄띄엄 이어질 뿐이다. 줄은 대부분이 칠해져 있어야 한다
+    lines.push(...merged.filter(l => l.x1 - l.x0 > 40 && l.ink > (l.x1 - l.x0) * 0.7));
     i = j;
   }
   lines.sort((a, b) => a.y - b.y || a.x0 - b.x0);
@@ -61,7 +68,9 @@ export function findStaves(page) {
       group.forEach(k => used.add(k));
       const ls = group.map(k => lines[k]);
       staves.push({
-        x0: ls[0].x0, x1: ls[0].x1, lines: ls.map(l => l.y), gaps: ls[0].gaps,
+        // TAB 숫자 자리의 끊김은 빈칸이 아니다 (빈칸 안에 글자가 없는 것만)
+        x0: ls[0].x0, x1: ls[0].x1, lines: ls.map(l => l.y), gaps: ls[0].gaps.filter(([a, c]) => !page.glyphs.some(q => /^\d$/.test(q.uni || "") &&
+          (q.bbox[0] + q.bbox[2]) / 2 > a && (q.bbox[0] + q.bbox[2]) / 2 < c && q.bbox[3] > ls[0].y - 1 && q.bbox[1] < ls[ls.length - 1].y + 1)),
         top: ls[0].y, bottom: ls[ls.length - 1].y,
         gap: (ls[ls.length - 1].y - ls[0].y) / (ls.length - 1),
         count: ls.length,
@@ -1528,8 +1537,49 @@ function applyWhammy(part, bars) {
   }
 }
 
+/**
+ * TAB에 기둥이 없고 리듬은 오선보에만 있는 악보(기타 프로에서 내보낸 PDF 등): 오선보에서 읽은 음마다
+ * 같은 자리의 TAB 숫자로 줄·프렛을 정한다. 맞는 숫자가 없으면 프렛이 가장 낮은 줄
+ */
+function tabFromStd(measures, staff, glyphs, strings) {
+  const open = (TUNINGS[strings] || TUNINGS[6]).split(" ").map(t => (+t.slice(1) + 1) * 12 + SEMI[t[0].toUpperCase()]);
+  const digits = glyphs.filter(q => q.text && /^\d$/.test(q.uni || "") && inBand(q, staff, staff.gap * 0.6, staff.gap * 0.6))
+    .map(q => {
+      const cy = (q.bbox[1] + q.bbox[3]) / 2;
+      const string = staff.lines.reduce((b, y, i) => Math.abs(y - cy) < Math.abs(staff.lines[b] - cy) ? i : b, 0) + 1;
+      return { x0: q.bbox[0], x1: q.bbox[2], string, ch: q.uni };
+    }).sort((a, b) => a.string - b.string || a.x0 - b.x0);
+  const frets = [];
+  for (const d of digits) {
+    const last = frets[frets.length - 1];
+    if (last && last.string === d.string && d.x0 - last.x1 < 1.8 && last.ch.length < 2) { last.ch += d.ch; last.x1 = d.x1; }
+    else frets.push({ ...d });
+  }
+  for (const f of frets) { f.x = (f.x0 + f.x1) / 2; f.fret = +f.ch; }
+  for (const m of measures) for (const e of m) {
+    if (e.rest || !e.notes?.length) continue;
+    const used = new Set();
+    e.notes = e.notes.map(n => {
+      const midi = (n.oct + 1) * 12 + SEMI[n.step] + (n.alter || 0) - 12; // 기타·베이스 오선보는 한 옥타브 높게 적는다
+      const f = frets.find(f => !used.has(f.string) && Math.abs(f.x - e.x) < 3.5 && open[f.string - 1] + f.fret === midi);
+      let string, fret;
+      if (f) ({ string, fret } = f);
+      else {
+        const ok = open.map((o, i) => ({ string: i + 1, fret: midi - o })).filter(c => c.fret >= 0 && c.fret <= 24 && !used.has(c.string));
+        if (!ok.length) return null;
+        ({ string, fret } = ok.sort((a, b) => a.fret - b.fret)[0]);
+      }
+      used.add(string);
+      return { string, fret, tie: !!n.tie };
+    }).filter(Boolean);
+    if (!e.notes.length) e.rest = true;
+  }
+  return measures;
+}
+
 function parseSystems(list) {
   const parts = [];      // 파트 순서는 첫 단 기준
+  const carry = new Map(); // 단 첫머리에 음자리표·조표를 다시 적지 않는 악보: 앞 단의 것을 이어 쓴다
   const bars = [];
   const report = [];
   const layoutCache = new Map();
@@ -1568,9 +1618,28 @@ function parseSystems(list) {
       const rdots = markRepeatDots(sys, pg.glyphs, verts);
       const nav = navigationMarks(sys, pg.glyphs, edges, rdots);
       const chordsAt = [];
+      const seen = {};
+      const std = (p, k, role, opts) => {
+        const id = `${p.kind}:${seen[p.kind + role] = (seen[p.kind + role] || 0) + 1}:${role}`, st = sys.staves[k];
+        const prev = !clefOf(st, pg.glyphs) && carry.get(id);
+        const ms = parseStdStaff(pg, st, pg.glyphs, verts, beams, sb, { others: pageStaves, fulls, ...opts, ...(prev ? { clef: prev.clef, key: prev.key } : {}) });
+        carry.set(id, { clef: ms.clef, key: ms.length ? ms[ms.length - 1].key : ms.key });
+        return ms;
+      };
       const parsed = layout.map(p => {
         if (p.kind === "guitar" || p.kind === "bass") {
           const ms = parseTabStaff(pg, sys.staves[p.tab], pg.glyphs, verts, beams, sb, fulls, p.std != null ? smallHeadXs(sys.staves[p.std], pg.glyphs) : []);
+          // 숫자는 있는데 기둥이 없는 TAB: 리듬과 음은 오선보에서 (쉬는 파트의 빈 TAB은 그대로 쉼표)
+          const tab = sys.staves[p.tab];
+          if (p.std != null && !ms.some(m => m.some(e => !e.rest)) &&
+            pg.glyphs.some(q => (/^\d$/.test(q.uni || "") || /^d\d$/.test(q.cls || "")) && inBand(q, tab, tab.gap * 0.6, tab.gap * 0.6))) {
+            const fromStd = std(p, p.std, "tab", {});
+            if (fromStd.some(m => m.some(e => !e.rest))) {
+              tabFromStd(fromStd, sys.staves[p.tab], pg.glyphs, p.strings);
+              fromStd.ottava = [];
+              return fromStd;
+            }
+          }
           if (p.std != null) {
             markStdPitch(ms, sys.staves[p.std], pg.glyphs);
             // 오선보의 8va는 표기만 (소리는 TAB 프렛 그대로)
@@ -1579,14 +1648,14 @@ function parseSystems(list) {
           return ms;
         }
         if (p.kind === "piano") {
-          const up = parseStdStaff(pg, sys.staves[p.std], pg.glyphs, verts, beams, sb, { others: pageStaves, fulls });
-          const lo = parseStdStaff(pg, sys.staves[p.lower], pg.glyphs, verts, beams, sb, { others: pageStaves, fulls });
+          const up = std(p, p.std, "up", {});
+          const lo = std(p, p.lower, "lo", {});
           const both = up.map((m, i) => { const r = [...m.map(e => ({ ...e, staff: 0 })), ...(lo[i] || []).map(e => ({ ...e, staff: 1 }))]; r.repeatOf2 = m.repeatOf2; r.repeatOf1 = m.repeatOf1 && (lo[i]?.repeatOf1 || !lo[i]?.length); r.x0 = m.x0; r.x1 = m.x1; r.key = m.key; return r; });
           both.key = up.key;
           both.ottava = [...up.ottava, ...lo.ottava.map(sp => ({ ...sp, staff: 1 }))];
           return both;
         }
-        return parseStdStaff(pg, sys.staves[p.std], pg.glyphs, verts, beams, sb, { drums: p.kind === "drums", others: pageStaves, fulls });
+        return std(p, p.std, "std", { drums: p.kind === "drums" });
       });
       attachWords(sys, pg, edges, layout, parsed);
       // 코드 이름: 같은 마디에서 가장 가까운 음표·쉼표의 박 위치에 둔다 (없으면 마디 안의 위치 비율로)
@@ -1654,8 +1723,8 @@ function parseSystems(list) {
           // 연습 기호 상자([A] [B] …): 본편과 부록을 맞추는 기준점
           const rehearsal = r === 0 && pg.glyphs.some(q => q.cls === "rbox" && q.bbox[3] < sys.staves[0].top && q.bbox[3] > sys.staves[0].top - 32 &&
             (q.bbox[0] + q.bbox[2]) / 2 > edges[i] - 4 && (q.bbox[0] + q.bbox[2]) / 2 < edges[i + 1] - 4);
-          // 조표: 이 단의 첫 오선보(보컬·건반) 기준
-          const keyOf = parsed.map((m, k) => layout[k].kind !== "guitar" && layout[k].kind !== "bass" && layout[k].kind !== "drums" ? m[i]?.key ?? m.key : undefined).find(k => k !== undefined);
+          // 조표: 이 단의 첫 오선보(보컬·건반, 오선보로 읽은 TAB 파트) 기준
+          const keyOf = parsed.map((m, k) => layout[k].kind !== "drums" ? m[i]?.key ?? m.key : undefined).find(k => k != null);
           bars.push({ ts: tsList[i], page: pi, x: edges[i], nav: r === 0 ? nav[i] || {} : {}, multiRest: restN[i] > 1, keyChange: keyMark >= 2, rehearsal, key: keyOf,
             chords: r === 0 ? chordsAt[i] : undefined });
           layout.forEach((p, k) => targets[k].measures.push(r === 0 ? barRest(parsed[k][i] || [], fulls[i]) : []));
@@ -2198,8 +2267,10 @@ export function detectTempo(pages) {
 export function looksLikeBandScore(pages) {
   let labeled = 0, total = 0, systems = 0;
   for (const pg of pages) {
-    total += pg.glyphs.length;
-    labeled += pg.glyphs.filter(q => q.cls).length;
+    // 한글·가나·한자 가사는 기호 비율을 낮출 뿐이므로 세지 않는다
+    const counted = pg.glyphs.filter(q => !(q.text && /[぀-ヿ㐀-鿿가-힣]/.test(q.uni || "")));
+    total += counted.length;
+    labeled += counted.filter(q => q.cls).length;
     // 밴드 스코어(4보표 이상) 또는 피아노 등 2보표 이상의 단
     systems += groupSystems(findStaves(pg), verticalRects(pg)).filter(s => s.staves.length >= 2).length;
   }
@@ -2430,9 +2501,21 @@ export function chordSymbols(sys, pg, edges) {
     const s = q.ch || (/^d\d$/.test(q.cls || "") && q.cls.slice(1));
     if (s && near(q.bbox)) letters.push({ s, b: q.bbox });
   }
+  // 연습 기호 상자 안의 글자([A] 등): 글자 바로 위에 짧은 가로선(상자 윗변)이 있다
+  const boxed = b => pg.rects.some(r => r.y1 - r.y0 < 1.2 && r.x1 - r.x0 < 20 && r.x0 <= b[0] + 1 && r.x1 >= b[0] + 2 && r.y1 <= b[1] + 1.5 && b[1] - r.y1 < 4);
+  // 악보 글꼴(SMuFL)의 ♭·♯ 글자
+  const smufl = str => str.replace(//g, "b").replace(//g, "#");
   for (const t of pg.texts || []) {
-    const b = [t.x, t.y - t.size * 0.7, t.x + t.str.trim().length * t.size * 0.55, t.y];
-    if (near(b) && (CHORD_RE.test(t.str.trim()) || CHORD_TAIL.test(t.str.trim()))) letters.push({ s: t.str.trim(), b, tail: !CHORD_RE.test(t.str.trim()) });
+    const str = smufl(t.str.trim());
+    const b = [t.x, t.y - t.size * 0.7, t.x + str.length * t.size * 0.55, t.y];
+    if (!near(b) || boxed(b)) continue;
+    if (CHORD_RE.test(str) || CHORD_TAIL.test(str)) { letters.push({ s: str, b, tail: !CHORD_RE.test(str) }); continue; }
+    // 띄어 적은 두 코드가 한 덩어리 글자로 들어온 경우("Cm    E"): 글자마다의 위치로 나눈다
+    if (/^[A-G#bmMajdinsuug0-9()+\-\/,\s]+$/.test(t.str.trim()))
+      for (const q of pg.glyphs) if (q.text && q.uni && q.uni.trim() && Math.abs(q.y - t.y) < 1 && q.bbox[0] >= t.x - 0.5 && q.bbox[0] < b[2] + t.size * 6) {
+        const c = smufl(q.uni);
+        if (CHORD_RE.test(c) || CHORD_TAIL.test(c)) letters.push({ s: c, b: [q.bbox[0], q.bbox[1], q.bbox[2], q.bbox[3]], tail: !CHORD_RE.test(c) });
+      }
   }
   // 이어진 글자를 낱말로 (위첨자 "(9)"처럼 조금 떠 있는 글자도 세로로 겹치면 같은 낱말)
   const words = [];
