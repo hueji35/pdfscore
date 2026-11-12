@@ -2402,22 +2402,26 @@ const SMALL_KANA = /^[ぁぃぅぇぉっゃゅょゎァィゥェォッャュョ]
  * 낱글자 영어는 붙어 있는 것끼리, 작은 가나는 앞 글자에 합친다. 장음 "ー"는 얇은 사각형으로 그려져 있다.
  * @returns [[{ x, s }]]
  */
-const HANGUL = /^[가-힣]$/;
+const HANGUL = /^[가-힣]$/, CJK = /^[぀-ヿ一-鿿가-힣]$/;
 export function lyricsOf(pg, staff, next) {
   const bottom = next ? next.top : staff.bottom + 24;
   const inBand = b => b[1] > staff.bottom && b[3] < bottom;
-  // 글꼴을 넣어 찍은 한글은 윤곽을 읽을 필요 없이 글자 코드를 쓴다
-  const textOf = q => q.lyr || (q.text && HANGUL.test(q.uni || "") ? q.uni : null);
+  // 글꼴을 넣어 찍은 한글·가나·한자는 윤곽을 읽을 필요 없이 글자 코드를 쓴다.
+  // 그 가사 글꼴로 찍은 영어 글자("Hey")도 가사
+  const lyricFonts = new Set(pg.glyphs.filter(q => q.text && CJK.test(q.uni || "") && inBand(q.bbox)).map(q => q.font));
+  const textOf = q => q.lyr || (q.text && (CJK.test(q.uni || "") || (lyricFonts.has(q.font) && /^[A-Za-z!?]$/.test(q.uni || ""))) ? q.uni : null);
   const chars = pg.glyphs.filter(q => textOf(q) && !q.inDirection && !/^\d+$/.test(textOf(q)) && !/[<>]/.test(textOf(q)) && inBand(q.bbox))
-    .map(q => ({ x0: q.bbox[0], x1: q.bbox[2], y0: q.bbox[1], y1: q.bbox[3], s: textOf(q) }));
+    .map(q => ({ x0: q.bbox[0], x1: q.bbox[2], y0: q.bbox[1], y1: q.bbox[3], s: textOf(q), base: q.text && !q.lyr ? q.y : undefined }));
   // 도형 기호가 아니라 페이지 좌표로 바로 그린 글자 (こ는 윗획이 사각형, 아랫획이 곡선 도형이다)
   for (const p of pg.polys) if (p.lyr && inBand(p.bbox)) chars.push({ x0: p.bbox[0], x1: p.bbox[2], y0: p.bbox[1], y1: p.bbox[3], s: p.lyr });
   const isStrokeOfKo = q => chars.some(c => c.s === "こ" && q.x0 >= c.x0 - 1 && q.x1 <= c.x1 + 1 && q.y1 <= c.y0 && c.y0 - q.y1 < 4);
   const rows = [];
-  for (const c of [...chars].sort((a, b) => a.y1 - b.y1)) {
-    const row = rows.find(r => c.y1 - r.y1 < 2.5 && r.y1 - c.y1 < 2.5);
+  // 글자 코드가 있는 글자는 기준선으로 줄을 나눈다 (장음 "ー"처럼 아래가 뜬 글자도 같은 줄)
+  const lineY = c => c.base ?? c.y1;
+  for (const c of [...chars].sort((a, b) => lineY(a) - lineY(b))) {
+    const row = rows.find(r => Math.abs(lineY(c) - r.line) < 2.5);
     if (row) { row.items.push(c); row.y0 = Math.min(row.y0, c.y0); }
-    else rows.push({ y0: c.y0, y1: c.y1, items: [c] });
+    else rows.push({ y0: c.y0, y1: c.y1, line: lineY(c), items: [c] });
   }
   for (const r of rows) {
     if (r.items.some(c => HANGUL.test(c.s))) continue;
@@ -2455,9 +2459,13 @@ export function lyricsOf(pg, staff, next) {
 function attachWords(sys, pg, edges, layout, parsed) {
   const measureAt = x => { let i = 0; while (i < edges.length - 2 && x >= edges[i + 1] - 1) i++; return i; };
   pg.directions ||= directionsOf(pg); // 지시 글자를 먼저 표시해 둔다
+  // 가사는 보컬 등 오선보 파트에. 그런 파트가 없는 TAB 악보는 첫 TAB 파트(TAB 아래에 적힌다)에
+  const hasStd = layout.some(p => p.kind === "std");
+  const host = hasStd ? null : layout.findIndex(p => p.kind === "guitar" || p.kind === "bass");
   layout.forEach((p, k) => {
-    if (p.kind !== "std") return;
-    lyricsOf(pg, sys.staves[p.std], sys.staves[p.std + 1]).forEach((chunks, row) => {
+    if (hasStd ? p.kind !== "std" : k !== host) return;
+    const st = sys.staves[hasStd ? p.std : p.tab];
+    lyricsOf(pg, st, sys.staves[sys.staves.indexOf(st) + 1] || { top: st.bottom + st.gap * 8 }).forEach((chunks, row) => {
       for (const c of chunks) {
         const notes = (parsed[k][measureAt(c.x)] || []).filter(e => !e.rest);
         let best = null;
